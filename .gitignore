@@ -1,0 +1,43 @@
+target/
+*.class
+*.nbm
+*.jar
+*.log
+
+# IDE / NetBeans
+nbproject/private/
+nbbuild/
+dist/
+nbdist/
+.nb-gradle/
+build/
+nb-configuration.xml
+nbactions.xml
+
+# IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Eclipse
+.classpath
+.project
+.settings/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local tooling / AI assistant config (not for the repo)
+.claude/
+
+# Secrets — just in case someone accidentally drops a config file
+.env
+*.env
+secrets.*
+*bearer*.txt
+*token*.txt

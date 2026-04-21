@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.gephi</groupId>
+        <artifactId>gephi-plugin-parent</artifactId>
+        <version>0.10.0</version>
+    </parent>
+
+    <groupId>org.gephi.plugins.xapi</groupId>
+    <artifactId>gephi-xapi-importer-parent</artifactId>
+    <version>1.0.0</version>
+    <packaging>pom</packaging>
+
+    <name>Gephi X API Streaming Importer (parent)</name>
+    <description>Real-time network graph built from the X (Twitter) API v2 by keyword.</description>
+
+    <modules>
+        <module>modules/XApiStreamingImporter</module>
+    </modules>
+</project>
