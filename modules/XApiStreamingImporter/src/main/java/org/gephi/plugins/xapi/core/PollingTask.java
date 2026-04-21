@@ -83,20 +83,18 @@ final class PollingTask implements Runnable {
                     hadError = true;
                     listener.onStatus(StatusListener.Level.ERROR,
                             "Forbidden (HTTP 403). Your app does not have access to this endpoint. "
-                            + "The X API Free tier is write-only; <b>search/recent requires the Basic tier "
-                            + "(~$200/mo)</b> or higher. Upgrade at "
-                            + "<a href='https://developer.x.com/en/portal/products'>"
-                            + "developer.x.com/en/portal/products</a>.");
+                            + "Check your app's permissions at "
+                            + "<a href='https://developer.x.com/en/portal/dashboard'>"
+                            + "developer.x.com/en/portal/dashboard</a>.");
                     return;
                 }
                 if (result.statusCode == 402) {
                     hadError = true;
                     listener.onStatus(StatusListener.Level.ERROR,
-                            "Payment required (HTTP 402: CreditsDepleted). Your X developer account "
-                            + "has no credits for this endpoint. The Free tier does not grant read access "
-                            + "to search. Upgrade to the <b>Basic tier (~$200/mo)</b> at "
-                            + "<a href='https://developer.x.com/en/portal/products'>"
-                            + "developer.x.com/en/portal/products</a>.");
+                            "Payment required (HTTP 402: CreditsDepleted). The X API uses "
+                            + "pay-per-use credit pricing and your account has no credits for this request. "
+                            + "Purchase credits in the Developer Console at "
+                            + "<a href='https://console.x.com'>console.x.com</a>, then retry.");
                     return;
                 }
                 if (result.statusCode == 429) {

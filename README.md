@@ -29,17 +29,21 @@ There was a [totetmatt/gephi-plugins `twitter_v2`](https://github.com/totetmatt/
 
 ---
 
-## ⚠️ X API access: this requires a paid tier
+## ⚠️ X API access: you need credits
 
-As of 2024 the X API Free tier is **write-only** (1,500 posts/month, no read access). Both data paths in this plugin use read endpoints, so the Free tier will return `HTTP 402 CreditsDepleted` or `HTTP 403`.
+The X API moved to a **pay-per-usage, credit-based model** — there are no monthly Free / Basic / Pro subscription tiers any more. From [docs.x.com/x-api/introduction](https://docs.x.com/x-api/introduction): *"The X API uses pay-per-usage pricing. No subscriptions—pay only for what you use."*
 
-| Tier  | Monthly cost | `search/recent` | `search/stream` |
-| ----- | -----------: | :-------------: | :-------------: |
-| Free  |       $0     |       ❌         |       ❌         |
-| Basic |     ~$200    |       ✅         |       ✅         |
-| Pro   |    ~$5,000   |       ✅         |   ✅ (higher limits)  |
+- You **buy credits up front** in the Developer Console.
+- **Each endpoint has its own per-request cost in credits.** Different endpoints cost different amounts.
+- Responses are **deduplicated within a 24-hour UTC day window** — re-fetching the same tweet within a day doesn't get charged twice.
+- **No recurring subscription, no contracts, no minimum spend.**
+- xAI credits rebate, per docs: 10% back at $200–$499 cumulative spend, 15% at $500–$999, 20% at $1,000+.
 
-Upgrade at [developer.x.com/en/portal/products](https://developer.x.com/en/portal/products). The plugin surfaces these errors with a clickable upgrade link in its status panel, so it's obvious when you've hit a tier gate rather than a bug.
+**Authoritative pricing:** per-endpoint credit costs and the credit-to-dollar conversion are shown in the [Developer Console](https://console.x.com) — they aren't quoted in the public docs and can change, so this README deliberately does not hard-code numbers.
+
+If your account has no credits, the X API returns **`HTTP 402 CreditsDepleted`** on any read request, including `search/recent` and `search/stream`. The plugin surfaces that error verbatim with a clickable link straight to the console.
+
+> **Heads up:** If you're looking for a totally free way to pull from X, there isn't one as of this writing. Every path this plugin uses is a read, and reads are billable.
 
 ---
 

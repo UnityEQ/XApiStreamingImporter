@@ -85,13 +85,18 @@ final class StreamTask implements Runnable {
     private boolean syncRules() throws IOException, InterruptedException {
         HttpResult getRules = transport.get("/2/tweets/search/stream/rules");
         if (!getRules.ok()) {
-            if (getRules.statusCode == 402 || getRules.statusCode == 403) {
+            if (getRules.statusCode == 402) {
                 listener.onStatus(StatusListener.Level.ERROR,
-                        "Filtered stream unavailable (HTTP " + getRules.statusCode + "). "
-                        + "Your X developer account does not have access. "
-                        + "Filtered stream requires <b>Basic tier (~$200/mo)</b> or higher. "
-                        + "Upgrade at <a href='https://developer.x.com/en/portal/products'>"
-                        + "developer.x.com/en/portal/products</a>.");
+                        "Filtered stream unavailable (HTTP 402: CreditsDepleted). "
+                        + "The X API uses pay-per-use credit pricing and your account has no credits. "
+                        + "Purchase credits in the Developer Console at "
+                        + "<a href='https://console.x.com'>console.x.com</a>, then retry.");
+            } else if (getRules.statusCode == 403) {
+                listener.onStatus(StatusListener.Level.ERROR,
+                        "Filtered stream unavailable (HTTP 403). Your app does not have access. "
+                        + "Check permissions at "
+                        + "<a href='https://developer.x.com/en/portal/dashboard'>"
+                        + "developer.x.com/en/portal/dashboard</a>.");
             } else {
                 listener.onStatus(StatusListener.Level.ERROR,
                         "Cannot fetch stream rules (HTTP " + getRules.statusCode + "). Body: "

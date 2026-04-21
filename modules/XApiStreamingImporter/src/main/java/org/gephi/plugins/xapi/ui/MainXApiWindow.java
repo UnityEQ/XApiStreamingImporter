@@ -140,7 +140,7 @@ public final class MainXApiWindow extends TopComponent {
         pathGroup.add(pollingRadio);
         pathGroup.add(streamRadio);
         streamRadio.setToolTipText("<html>Long-lived connection with server-side rules.<br/>"
-                + "Requires X API Basic tier (~$200/mo) or higher.</html>");
+                + "Read endpoint &mdash; consumes X API credits per request.</html>");
         form.add(pathGroup, gc);
         row++;
 
