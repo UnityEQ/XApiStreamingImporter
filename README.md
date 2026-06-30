@@ -6,6 +6,7 @@ Turn X (Twitter) search results into **directed, weighted interaction graphs** f
 |---|---|
 | **Nodes** | Users — `username`, display name, profile image |
 | **Edges** | `MENTION` · `REPLY` · `RETWEET` · `QUOTE` · `LIKE` (weighted) |
+| **Gephi** | GEXF + CSV export; `enrich` adds `primary_interaction` for node coloring |
 | **Transport** | [`xurl`](https://github.com/xdevplatform/xurl) — same OAuth bridge as the [xapi MCP server](https://docs.x.com/tools/mcp) |
 
 Built for researchers who jump between topics: **one folder per query**, backward crawls from recent posts, and hard guards so a bad run cannot silently burn through pay-per-use credits.
@@ -24,6 +25,12 @@ That will:
 2. Build mention / reply / RT / quote edges from the results (no extra API calls)
 3. Save state to `data/queries/digital-circus-lang-en/`
 4. Export `x_graph.gexf` + CSV to `data/queries/digital-circus-lang-en/output/`
+5. Enrich nodes for Gephi coloring (free, no API):
+
+```bash
+python -m x_graph.cli enrich -q "digital circus lang:en"
+# → output/x_graph_nodes_enriched.csv (adds primary_interaction per user)
+```
 
 Re-run the **same command** to page backward in time. Check progress for free:
 
@@ -42,6 +49,7 @@ X search query
     → optionally expand high-engagement posts        ← likers / reposters / quoters (capped)
     → SQLite dedupe + resume
     → export GEXF + CSV
+    → enrich nodes (optional)        ← add primary_interaction for Gephi node colors
 ```
 
 **Default mode is backward crawl** — each run starts at the most recent matching posts and pages older. Re-run the same query to keep going back in time (last 7 days with `--search-mode recent`).
@@ -100,6 +108,20 @@ python -m x_graph.cli status -q "digital circus lang:en"
 python -m x_graph.cli collect -q "digital circus lang:en" --dry-run
 
 python -m x_graph.cli export -q "digital circus lang:en"
+
+python -m x_graph.cli enrich -q "digital circus lang:en"
+```
+
+### Enrich nodes for Gephi colors (free)
+
+Adds `primary_interaction` to nodes — each user's most common **outgoing** edge type (`MENTION`, `REPLY`, etc.). Use this so nodes can be colored by interaction in Gephi (edges already have `Interaction`; nodes do not until enriched).
+
+```bash
+python -m x_graph.cli enrich -q "digital circus lang:en"
+# → output/x_graph_nodes_enriched.csv
+
+python -m x_graph.cli enrich -q "digital circus lang:en" --in-place
+# → overwrites output/x_graph_nodes.csv
 ```
 
 ### Cheapest live collect (recommended)
@@ -210,9 +232,28 @@ summary = collect_with_mcp(
 )
 ```
 
+Enrich nodes after export (no API):
+
+```python
+from pathlib import Path
+from x_graph.enrich import enrich_nodes
+from x_graph.paths import default_work_dir
+
+work = default_work_dir("digital circus lang:en")
+out = work / "output"
+
+enrich_nodes(
+    out / "x_graph_nodes.csv",
+    out / "x_graph_edges.csv",
+    out / "x_graph_nodes_enriched.csv",
+)
+```
+
 ---
 
-## CLI flags
+## CLI reference
+
+### `collect`
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -232,6 +273,33 @@ summary = collect_with_mcp(
 | `--export-after` | off | Write GEXF + CSV when done |
 
 **Engagement score** = `likes + 2×retweets + 3×quotes + replies`
+
+### `enrich` (free — no API)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-q`, `--query` | — | Resolve `data/queries/<slug>/` (or use `--work-dir`) |
+| `--work-dir` | auto | Folder containing `output/x_graph_nodes.csv` |
+| `--output` | auto | Output path; default `output/x_graph_nodes_enriched.csv` |
+| `--in-place` | off | Overwrite `x_graph_nodes.csv` instead of a new file |
+
+Reads `x_graph_nodes.csv` + `x_graph_edges.csv`, writes nodes with added column:
+
+| Column | Meaning |
+|--------|---------|
+| `primary_interaction` | Most frequent outgoing `Interaction` for that user |
+| `none` | User has no outgoing edges in the graph |
+
+Prints JSON stats on completion: `nodes`, `with_primary_interaction`, `interaction_types`.
+
+Also available as `x-graph enrich` if installed via `pip install -e .`.
+
+### `status` / `export` (free)
+
+```bash
+python -m x_graph.cli status -q "digital circus lang:en"
+python -m x_graph.cli export -q "digital circus lang:en"
+```
 
 ---
 
@@ -289,14 +357,16 @@ Each query gets its own directory:
 data/queries/digital-circus-lang-en/
 ├── state.db                 # posts seen, edges, pagination cursor, expansion queue
 └── output/
-    ├── x_graph.gexf         # ← open this in Gephi
+    ├── x_graph.gexf              # ← open this in Gephi
     ├── x_graph_nodes.csv
+    ├── x_graph_nodes_enriched.csv   # after `enrich` (includes primary_interaction)
     └── x_graph_edges.csv
 ```
 
 | File | Key columns |
 |------|-------------|
 | `x_graph_nodes.csv` | `Id, Label, username, name, profile_image_url` |
+| `x_graph_nodes_enriched.csv` | above + `primary_interaction` |
 | `x_graph_edges.csv` | `Source, Target, Weight, Interaction, post_id` |
 
 The legacy flat layout (`data/output/`, `data/state.db`) is no longer used.
@@ -316,9 +386,32 @@ The legacy flat layout (`data/output/`, `data/state.db`) is no longer used.
 2. Import `x_graph_edges.csv` as **Edges** (`Source`, `Target`, `Weight`, `Interaction`)
 3. Switch to Overview → ForceAtlas 2
 
+### Color nodes by interaction type
+
+Gephi can only color **nodes** from node attributes. Edges have `interaction`; nodes do not until you enrich them:
+
+```bash
+python -m x_graph.cli enrich -q "digital circus lang:en"
+```
+
+Writes `data/queries/digital-circus-lang-en/output/x_graph_nodes_enriched.csv` with a `primary_interaction` column (most common outgoing edge type per user).
+
+In Gephi:
+
+1. **Data Laboratory → Import Spreadsheet** → `x_graph_nodes_enriched.csv` → **Nodes table** (merge on `Id`)
+2. **Appearance → Nodes → Color → Partition → `primary_interaction`**
+3. **Appearance → Edges → Color → Partition → `interaction`** — use matching colors
+
+Overwrite the original nodes file instead:
+
+```bash
+python -m x_graph.cli enrich -q "digital circus lang:en" --in-place
+```
+
 ### Styling
 
 - **Edge colors:** Appearance → Edges → Color → Partition → `interaction`
+- **Node colors:** Appearance → Nodes → Color → Partition → `primary_interaction` (after `enrich`)
 - **Node size:** Statistics → Degree → Run → Appearance → Nodes → Size → Ranking → Degree
 - **Hub labels only:** Appearance → Labels → Size → Ranking → `degree` (raise max threshold until low-degree labels disappear)
 
@@ -369,6 +462,7 @@ gephi-x-mcp/
 │   ├── paths.py             # Query → folder slug
 │   ├── state.py             # SQLite incremental state
 │   ├── export.py            # GEXF + CSV
+│   ├── enrich.py            # primary_interaction for Gephi node colors
 │   └── ...
 ├── mcps/xapi/tools/         # xapi MCP tool schemas (no secrets)
 ├── data/queries/            # Per-topic graphs (see digital-circus-lang-en/)

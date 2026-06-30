@@ -10,6 +10,7 @@ from pathlib import Path
 
 from x_graph.collector import GraphCollector
 from x_graph.config import CollectorConfig
+from x_graph.enrich import enrich_nodes
 from x_graph.export import export_graph
 from x_graph.paths import default_work_dir, query_slug
 from x_graph.state import StateStore
@@ -100,6 +101,23 @@ def _build_parser() -> argparse.ArgumentParser:
     stats.add_argument("--work-dir", default=None)
     stats.add_argument("--query", "-q", default=None, help="Resolve work dir from query slug")
 
+    enrich = sub.add_parser(
+        "enrich",
+        help="Add primary_interaction to nodes CSV for Gephi coloring (no API calls)",
+    )
+    enrich.add_argument("--work-dir", default=None)
+    enrich.add_argument("--query", "-q", default=None, help="Resolve work dir from query slug")
+    enrich.add_argument(
+        "--output",
+        default=None,
+        help="Output path (default: <work-dir>/output/x_graph_nodes_enriched.csv)",
+    )
+    enrich.add_argument(
+        "--in-place",
+        action="store_true",
+        help="Overwrite x_graph_nodes.csv instead of writing a new file",
+    )
+
     return parser
 
 
@@ -124,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_export(args)
     if args.command == "status":
         return _cmd_status(args)
+    if args.command == "enrich":
+        return _cmd_enrich(args)
     return 1
 
 
@@ -203,6 +223,35 @@ def _cmd_status(args: argparse.Namespace) -> int:
         "has_more_older_posts": bool(state.get_meta("search_pagination_token")),
     }
     print(json.dumps(info, indent=2))
+    return 0
+
+
+def _cmd_enrich(args: argparse.Namespace) -> int:
+    work_dir = _resolve_work_dir(args)
+    output_dir = work_dir / "output"
+    nodes_path = output_dir / "x_graph_nodes.csv"
+    edges_path = output_dir / "x_graph_edges.csv"
+    output_path = Path(args.output) if args.output else output_dir / "x_graph_nodes_enriched.csv"
+
+    stats = enrich_nodes(
+        nodes_path,
+        edges_path,
+        output_path,
+        in_place=args.in_place,
+    )
+    dest = nodes_path if args.in_place else output_path
+    print(
+        json.dumps(
+            {
+                "work_dir": str(work_dir),
+                "nodes_file": str(nodes_path),
+                "edges_file": str(edges_path),
+                "output": str(dest),
+                **stats,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
