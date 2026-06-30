@@ -84,6 +84,28 @@ class StateStore:
                 (key, value),
             )
 
+    def clear_meta(self, key: str) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+
+    def reset_search_cursors(self) -> None:
+        """Restart search from the most recent results (backward mode)."""
+        for key in ("since_id", "search_pagination_token"):
+            self.clear_meta(key)
+
+    def reset_all(self) -> None:
+        """Wipe graph, queue, and search state for a clean restart."""
+        with self._conn() as conn:
+            conn.executescript(
+                """
+                DELETE FROM meta;
+                DELETE FROM seen_posts;
+                DELETE FROM expansion_queue;
+                DELETE FROM nodes;
+                DELETE FROM edges;
+                """
+            )
+
     def log_event(self, event: str, detail: dict[str, Any] | None = None) -> None:
         with self._conn() as conn:
             conn.execute(

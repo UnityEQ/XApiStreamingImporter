@@ -7,7 +7,15 @@ from typing import Any
 from x_graph.config import CollectorConfig
 from x_graph.graph import InteractionEdge, InteractionGraph
 from x_graph.state import StateStore
-from x_graph.x_client import ApiBudgetExceeded, PostNotFoundError, XApiClient
+from x_graph.offline import OfflineXApiClient
+from x_graph.run_lock import RunLock
+from x_graph.x_client import (
+    ApiBudgetExceeded,
+    ApiFatalError,
+    ApiRateLimitError,
+    PostNotFoundError,
+    XApiClient,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,41 +26,149 @@ class GraphCollector:
     def __init__(self, config: CollectorConfig, client: XApiClient | None = None) -> None:
         self.config = config
         self.state = StateStore(config.state_db)
-        self.client = client or XApiClient(
-            api_call_budget=config.api_call_budget,
-            sleep_seconds=config.sleep_seconds,
-            max_retries=config.max_retries,
-        )
+        if client is not None:
+            self.client = client
+        elif config.dry_run:
+            self.client = OfflineXApiClient()
+        else:
+            self.client = XApiClient(
+                api_call_budget=config.api_call_budget,
+                sleep_seconds=config.sleep_seconds,
+                max_retries=config.max_retries,
+            )
 
     def run_once(self) -> dict[str, Any]:
+        lock = RunLock(self.config.work_dir / ".collect.lock")
+        with lock:
+            return self._run_once_locked()
+
+    def _run_once_locked(self) -> dict[str, Any]:
+        self._prepare_run()
+        if self.config.dry_run:
+            logger.info("DRY RUN — no X API calls will be made")
+            return self._dry_run_summary()
+
         self.state.set_meta("query", self.config.query)
         self.state.set_meta("search_mode", self.config.search_mode)
+        self.state.set_meta("collection_mode", self.config.collection_mode)
         summary: dict[str, Any] = {
+            "query": self.config.query,
+            "work_dir": str(self.config.work_dir),
+            "collection_mode": self.config.collection_mode,
             "search_posts_new": 0,
             "edges_added": 0,
             "expansions_done": 0,
-            "api_calls": 0,
+            "api_calls_attempted": 0,
+            "api_calls_ok": 0,
             "stopped_reason": "completed",
         }
+        search_ok = True
 
         try:
             summary["search_posts_new"] = self._collect_search_pages()
-            summary["expansions_done"] = self._process_expansion_queue()
         except ApiBudgetExceeded:
             summary["stopped_reason"] = "api_budget_exhausted"
-            logger.info("Stopping run: API budget exhausted")
+            search_ok = False
+        except (ApiRateLimitError, ApiFatalError) as exc:
+            summary["stopped_reason"] = type(exc).__name__
+            logger.error("Stopping run immediately (no retries): %s", exc)
+            search_ok = False
+        except RuntimeError as exc:
+            summary["stopped_reason"] = "search_failed"
+            logger.error("Search failed, skipping expansions: %s", exc)
+            search_ok = False
 
-        summary["api_calls"] = self.client.calls_made
+        if (
+            search_ok
+            and not self.config.search_only
+            and self.config.max_expansions_per_run > 0
+        ):
+            try:
+                summary["expansions_done"] = self._process_expansion_queue()
+            except ApiBudgetExceeded:
+                summary["stopped_reason"] = "api_budget_exhausted"
+            except (ApiRateLimitError, ApiFatalError) as exc:
+                summary["stopped_reason"] = type(exc).__name__
+                logger.error("Stopping expansions immediately: %s", exc)
+
+        summary["api_calls_attempted"] = self.client.calls_attempted
+        summary["api_calls_ok"] = self.client.calls_made
         summary.update(self.state.stats())
         self.state.log_event("run_complete", summary)
         return summary
 
+    def _dry_run_summary(self) -> dict[str, Any]:
+        batch = self.state.pop_expansion_batch(self.config.max_expansions_per_run)
+        for item in batch:
+            self.state.enqueue_expansion(
+                item["post_id"],
+                item["author_id"],
+                item["engagement"],
+                item["priority"],
+            )
+        return {
+            "query": self.config.query,
+            "work_dir": str(self.config.work_dir),
+            "collection_mode": self.config.collection_mode,
+            "dry_run": True,
+            "stopped_reason": "dry_run",
+            "would_search_pages": self.config.max_search_pages_per_run,
+            "would_expansions": min(
+                self.config.max_expansions_per_run,
+                self.state.stats().get("queued_expansions", 0),
+            ),
+            "api_calls_attempted": 0,
+            "api_calls_ok": 0,
+            **self.state.stats(),
+        }
+
+    def _prepare_run(self) -> None:
+        stored_query = self.state.get_meta("query")
+        if self.config.fresh:
+            self.state.reset_search_cursors()
+            self.state.log_event("fresh_start", {"query": self.config.query})
+        elif stored_query and stored_query != self.config.query:
+            logger.warning(
+                "Query changed in %s (%r → %r); resetting search cursors.",
+                self.config.work_dir,
+                stored_query,
+                self.config.query,
+            )
+            self.state.reset_search_cursors()
+
+        if self.config.collection_mode == "backward":
+            self.state.clear_meta("since_id")
+
+    def _search_pages_this_run(self) -> int:
+        if self.config.search_only:
+            return min(
+                self.config.max_search_pages_per_run,
+                max(0, self.config.api_call_budget - self.client.calls_attempted),
+            )
+        reserve = min(
+            self.config.min_calls_for_expansion,
+            max(0, self.config.api_call_budget - 1),
+        )
+        available = max(1, self.config.api_call_budget - reserve - self.client.calls_attempted)
+        return min(self.config.max_search_pages_per_run, available)
+
+    def _expansions_this_run(self) -> int:
+        if self.config.search_only:
+            return 0
+        remaining = max(0, self.config.api_call_budget - self.client.calls_attempted)
+        if remaining < 3:
+            return 0
+        return min(self.config.max_expansions_per_run, remaining // 3)
+
     def _collect_search_pages(self) -> int:
         new_posts = 0
         pagination_token = self.state.get_meta("search_pagination_token")
-        since_id = self.state.get_meta("since_id") if self.config.use_since_id else None
+        since_id: str | None = None
+        if self.config.collection_mode == "incremental":
+            since_id = self.state.get_meta("since_id")
 
-        for page in range(self.config.max_search_pages_per_run):
+        page_limit = self._search_pages_this_run()
+        for page in range(page_limit):
             try:
                 payload = self.client.search_posts(
                     self.config.query,
@@ -64,9 +180,11 @@ class GraphCollector:
                 )
             except ApiBudgetExceeded:
                 raise
+            except (ApiRateLimitError, ApiFatalError):
+                raise
             except RuntimeError as exc:
                 logger.error("Search failed on page %s: %s", page + 1, exc)
-                break
+                raise
 
             posts = payload.get("data") or []
             includes = payload.get("includes") or {}
@@ -87,7 +205,7 @@ class GraphCollector:
 
             meta = payload.get("meta") or {}
             newest_id = meta.get("newest_id")
-            if newest_id and self.config.use_since_id:
+            if newest_id and self.config.collection_mode == "incremental":
                 current = self.state.get_meta("since_id")
                 if not current or int(newest_id) > int(current):
                     self.state.set_meta("since_id", str(newest_id))
@@ -191,7 +309,9 @@ class GraphCollector:
 
     def _process_expansion_queue(self) -> int:
         done = 0
-        batch = self.state.pop_expansion_batch(self.config.max_expansions_per_run)
+        batch = self.state.pop_expansion_batch(self._expansions_this_run())
+        if not batch:
+            return 0
         for item in batch:
             post_id = item["post_id"]
             author_id = item["author_id"]
@@ -206,14 +326,14 @@ class GraphCollector:
                 self.state.mark_post_expanded(post_id)
                 self.state.log_event("post_not_found", {"post_id": post_id, "detail": str(exc)})
                 done += 1
-            except ApiBudgetExceeded:
-                self.state.enqueue_expansion(
-                    post_id,
-                    author_id,
-                    item["engagement"],
-                    item["priority"],
-                )
+            except (ApiRateLimitError, ApiFatalError):
                 raise
+            except ApiBudgetExceeded:
+                raise
+            except RuntimeError as exc:
+                logger.error("Stopping expansions after API error on %s: %s", post_id, exc)
+                self.state.log_event("expansion_failed", {"post_id": post_id, "detail": str(exc)})
+                break
         return done
 
     def _expand_post(self, post_id: str, author_id: str) -> None:

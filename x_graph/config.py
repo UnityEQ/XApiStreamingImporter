@@ -21,36 +21,45 @@ class CollectorConfig:
     query: str
     work_dir: Path = Path("data")
 
+    # backward = newest→older via pagination (default for new topics)
+    # incremental = only posts newer than since_id (for --loop monitoring)
+    collection_mode: str = "backward"
+    fresh: bool = False
+
     # Search: "recent" (7-day, OAuth user/app) or "all" (full archive, app-only).
     search_mode: str = "recent"
     sort_order: str = "recency"
     search_page_size: int = 100
-    max_search_pages_per_run: int = 5
-
-    # Forward-only incremental collection uses since_id from state when set.
-    use_since_id: bool = True
+    max_search_pages_per_run: int = 3
 
     # Engagement expansion thresholds (score = likes + 2*RT + 3*quotes + replies).
-    min_engagement_to_expand: int = 10
+    min_engagement_to_expand: int = 25
     high_engagement_threshold: int = 100
     expand_high_engagement: bool = True
-    expand_medium_sample_rate: float = 0.25
+    expand_medium_sample_rate: float = 0.1
 
-    max_expansions_per_run: int = 50
-    max_likers_per_post: int = 100
-    max_reposters_per_post: int = 100
-    max_quotes_per_post: int = 50
+    max_expansions_per_run: int = 5
+    search_only: bool = False
+    dry_run: bool = False
+    max_likers_per_post: int = 50
+    max_reposters_per_post: int = 50
+    max_quotes_per_post: int = 25
     expansion_page_size: int = 100
 
-    # Hard budget: stop after this many API calls in one run.
-    api_call_budget: int = 200
-    sleep_seconds: float = 0.5
-    max_retries: int = 3
+    # Reserve API calls for expansions so search does not consume the whole budget.
+    min_calls_for_expansion: int = 8
+
+    # Hard budget: every HTTP attempt counts (failed calls still cost credits).
+    api_call_budget: int = 30
+    sleep_seconds: float = 1.0
+    max_retries: int = 0
 
     edge_types: tuple[str, ...] = ("MENTION", "REPLY", "RETWEET", "QUOTE", "LIKE")
 
     def __post_init__(self) -> None:
         self.work_dir = Path(self.work_dir)
+        if self.collection_mode not in {"backward", "incremental"}:
+            raise ValueError("collection_mode must be 'backward' or 'incremental'")
         if self.search_page_size < 10:
             self.search_page_size = 10
         if self.search_page_size > 100:

@@ -14,7 +14,6 @@ from x_graph.config import POST_FIELDS, SEARCH_EXPANSIONS, USER_FIELDS
 
 logger = logging.getLogger(__name__)
 
-# Maps MCP tool names (xapi server) to REST paths used by xurl.
 MCP_TOOL_PATHS: dict[str, str] = {
     "search_posts_all": "/2/tweets/search/all",
     "search_posts_recent": "/2/tweets/search/recent",
@@ -29,6 +28,14 @@ MCP_TOOL_PATHS: dict[str, str] = {
 
 class ApiBudgetExceeded(Exception):
     """Raised when the per-run API call budget is exhausted."""
+
+
+class ApiRateLimitError(Exception):
+    """Raised on HTTP 429 / rate limit — stop the run, do not retry."""
+
+
+class ApiFatalError(Exception):
+    """Raised on auth/config errors — stop the run, do not retry."""
 
 
 class PostNotFoundError(Exception):
@@ -53,29 +60,57 @@ def _errors_indicate_not_found(errors: Any) -> str | None:
     return None
 
 
-class XApiClient:
-    """Thin client over X API v2, mirroring xapi MCP tool semantics.
+def _classify_api_error(message: str, payload: dict[str, Any] | None = None) -> str:
+    text = message.lower()
+    if any(
+        token in text
+        for token in ("429", "too many requests", "rate limit", "rate-limit")
+    ):
+        return "rate_limit"
+    if any(
+        token in text
+        for token in ("401", "403", "unsupported authentication", "forbidden")
+    ):
+        return "fatal"
+    if payload:
+        status = payload.get("status")
+        if status == 429:
+            return "rate_limit"
+        if status in (401, 403):
+            return "fatal"
+        title = str(payload.get("title", "")).lower()
+        if "too many requests" in title:
+            return "rate_limit"
+    return "fatal"
 
-    Default transport uses `npx @xdevplatform/xurl` (same OAuth bridge as MCP).
-    Inject `mcp_call` to route calls through an MCP host instead.
-    """
+
+def _raise_classified_error(message: str, payload: dict[str, Any] | None = None) -> None:
+    kind = _classify_api_error(message, payload)
+    if kind == "rate_limit":
+        raise ApiRateLimitError(message)
+    raise ApiFatalError(message)
+
+
+class XApiClient:
+    """Thin client over X API v2, mirroring xapi MCP tool semantics."""
 
     def __init__(
         self,
         *,
         mcp_call: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
         xurl_command: list[str] | None = None,
-        api_call_budget: int = 200,
-        sleep_seconds: float = 0.5,
-        max_retries: int = 3,
+        api_call_budget: int = 30,
+        sleep_seconds: float = 1.0,
+        max_retries: int = 0,
         auth: str | None = None,
     ) -> None:
         self._mcp_call = mcp_call
         self._xurl_command = xurl_command or self._default_xurl_command()
         self._api_call_budget = api_call_budget
         self._sleep_seconds = sleep_seconds
-        self._max_retries = max_retries
+        self._max_retries = max(0, max_retries)
         self._auth = auth
+        self.calls_attempted = 0
         self.calls_made = 0
 
     @staticmethod
@@ -92,22 +127,26 @@ class XApiClient:
         return ["npx", "-y", "@xdevplatform/xurl"]
 
     def _check_budget(self) -> None:
-        if self.calls_made >= self._api_call_budget:
+        if self.calls_attempted >= self._api_call_budget:
             raise ApiBudgetExceeded(
                 f"API call budget exhausted ({self._api_call_budget} calls)"
             )
 
+    def _record_attempt(self) -> None:
+        self.calls_attempted += 1
+
     def _request(self, tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
         self._check_budget()
         last_error: Exception | None = None
+        attempts = 1 + self._max_retries
 
-        for attempt in range(self._max_retries):
+        for attempt in range(attempts):
+            self._record_attempt()
             try:
                 if self._mcp_call is not None:
                     payload = self._mcp_call(tool_name, params)
                 else:
                     payload = self._xurl_request(tool_name, params)
-                self.calls_made += 1
                 if self._sleep_seconds:
                     time.sleep(self._sleep_seconds)
                 if "errors" in payload and not payload.get("data") and not payload.get("includes"):
@@ -117,24 +156,31 @@ class XApiClient:
                             missing_id,
                             json.dumps(payload["errors"], ensure_ascii=False),
                         )
-                    raise RuntimeError(json.dumps(payload["errors"], ensure_ascii=False))
+                    detail = json.dumps(payload["errors"], ensure_ascii=False)
+                    _raise_classified_error(detail, payload)
+                self.calls_made += 1
                 return payload
             except ApiBudgetExceeded:
                 raise
             except PostNotFoundError:
                 raise
+            except (ApiRateLimitError, ApiFatalError):
+                raise
             except Exception as exc:
                 missing_id = _errors_indicate_not_found(_coerce_errors(exc))
                 if missing_id:
                     raise PostNotFoundError(missing_id, str(exc)) from exc
+                message = str(exc)
+                kind = _classify_api_error(message)
+                if kind == "rate_limit":
+                    raise ApiRateLimitError(message) from exc
+                if kind == "fatal" or attempt >= attempts - 1:
+                    raise ApiFatalError(message) from exc
                 last_error = exc
-                wait = self._sleep_seconds * (2**attempt)
-                logger.warning("API error (attempt %s/%s): %s", attempt + 1, self._max_retries, exc)
-                time.sleep(wait)
+                logger.warning("API error (attempt %s/%s): %s", attempt + 1, attempts, exc)
+                time.sleep(self._sleep_seconds)
 
-        if isinstance(last_error, PostNotFoundError):
-            raise last_error
-        raise RuntimeError(f"X API request failed after retries: {last_error}")
+        raise ApiFatalError(f"X API request failed: {last_error}")
 
     def _xurl_request(self, tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
         path_template = MCP_TOOL_PATHS[tool_name]
@@ -165,21 +211,26 @@ class XApiClient:
         result = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
             check=False,
             timeout=120,
             shell=False,
             env=os.environ.copy(),
         )
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            stdout = result.stdout.strip()
-            raise RuntimeError(stderr or stdout or f"xurl exited {result.returncode}")
+        stdout = (result.stdout or b"").decode("utf-8", errors="replace").strip()
+        stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
 
-        stdout = result.stdout.strip()
-        if not stdout:
-            return {}
-        return json.loads(stdout)
+        payload: dict[str, Any] | None = None
+        if stdout:
+            try:
+                payload = json.loads(stdout)
+            except json.JSONDecodeError:
+                payload = None
+
+        if result.returncode != 0 or payload is None:
+            detail = stderr or stdout or f"xurl exited {result.returncode}"
+            _raise_classified_error(detail, payload)
+
+        return payload
 
     def search_posts(
         self,
