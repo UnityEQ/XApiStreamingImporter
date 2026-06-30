@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "x-graph"
+version = "0.1.0"
+description = "Incremental X/Twitter interaction graph builder for Gephi"
+
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+x-graph = "x_graph.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["x_graph*"]
