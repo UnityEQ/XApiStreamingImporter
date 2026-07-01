@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from urllib.parse import urlencode
 
 from x_graph.config import POST_FIELDS, SEARCH_EXPANSIONS, USER_FIELDS
@@ -31,7 +32,7 @@ class ApiBudgetExceeded(Exception):
 
 
 class ApiRateLimitError(Exception):
-    """Raised on HTTP 429 / rate limit — stop the run, do not retry."""
+    """Raised when rate-limit retries are exhausted."""
 
 
 class ApiFatalError(Exception):
@@ -60,35 +61,151 @@ def _errors_indicate_not_found(errors: Any) -> str | None:
     return None
 
 
-def _classify_api_error(message: str, payload: dict[str, Any] | None = None) -> str:
+ErrorKind = Literal["rate_limit", "transient", "fatal"]
+
+
+class _ApiResponseError(Exception):
+    """Raw API/xurl failure before classification and retry policy."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        returncode: int | None = None,
+    ) -> None:
+        self.message = message
+        self.payload = payload
+        self.returncode = returncode
+        super().__init__(message)
+
+
+def _http_status_from_text(text: str) -> int | None:
+    lowered = text.lower()
+    for pattern in (
+        r"\bstatus(?:\s*code)?[:\s]+(\d{3})\b",
+        r"\bhttp[:\s/]+(\d{3})\b",
+        r"\berror[:\s]+(\d{3})\b",
+    ):
+        match = re.search(pattern, lowered)
+        if match:
+            return int(match.group(1))
+    if re.search(r"\b429\b", lowered):
+        return 429
+    return None
+
+
+def _classify_payload_errors(payload: dict[str, Any]) -> ErrorKind | None:
+    errors = payload.get("errors")
+    if not isinstance(errors, list):
+        return None
+    for err in errors:
+        if not isinstance(err, dict):
+            continue
+        title = str(err.get("title", "")).lower()
+        err_type = str(err.get("type", "")).lower()
+        detail = str(err.get("detail", "")).lower()
+        blob = " ".join((title, err_type, detail))
+        if any(
+            token in blob
+            for token in (
+                "too many requests",
+                "rate limit",
+                "rate-limit",
+                "too-many-requests",
+                "usage-capped",
+            )
+        ):
+            return "rate_limit"
+        if any(token in blob for token in ("forbidden", "unauthorized", "unsupported authentication")):
+            return "fatal"
+    return None
+
+
+def _classify_api_error(
+    message: str,
+    payload: dict[str, Any] | None = None,
+    returncode: int | None = None,
+) -> ErrorKind:
     text = message.lower()
+    status = returncode
+    if status is None:
+        status = _http_status_from_text(text)
+    if payload:
+        payload_status = payload.get("status") or payload.get("status_code")
+        if isinstance(payload_status, int):
+            status = payload_status
+        payload_kind = _classify_payload_errors(payload)
+        if payload_kind:
+            return payload_kind
+        title = str(payload.get("title", "")).lower()
+        detail = str(payload.get("detail", "")).lower()
+        blob = f"{title} {detail}"
+        if any(
+            token in blob
+            for token in ("too many requests", "rate limit", "usage-capped")
+        ):
+            return "rate_limit"
+
+    if status == 429:
+        return "rate_limit"
+    if status in (502, 503, 504):
+        return "transient"
+    if status in (401, 403):
+        return "fatal"
+
     if any(
         token in text
-        for token in ("429", "too many requests", "rate limit", "rate-limit")
+        for token in (
+            "too many requests",
+            "rate limit",
+            "rate-limit",
+            "usage-capped",
+            "usage cap",
+            "throttl",
+        )
     ):
         return "rate_limit"
     if any(
         token in text
-        for token in ("401", "403", "unsupported authentication", "forbidden")
+        for token in (
+            "401",
+            "403",
+            "unsupported authentication",
+            "forbidden",
+            "unauthorized",
+        )
     ):
         return "fatal"
-    if payload:
-        status = payload.get("status")
-        if status == 429:
-            return "rate_limit"
-        if status in (401, 403):
-            return "fatal"
-        title = str(payload.get("title", "")).lower()
-        if "too many requests" in title:
-            return "rate_limit"
+    if any(
+        token in text
+        for token in (
+            "request failed",
+            "502",
+            "503",
+            "504",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+            "temporarily unavailable",
+            "econnreset",
+            "etimedout",
+            "timeout",
+            "network",
+            "socket hang up",
+            "over capacity",
+        )
+    ):
+        return "transient"
     return "fatal"
 
 
-def _raise_classified_error(message: str, payload: dict[str, Any] | None = None) -> None:
-    kind = _classify_api_error(message, payload)
-    if kind == "rate_limit":
-        raise ApiRateLimitError(message)
-    raise ApiFatalError(message)
+def _raise_classified_error(
+    message: str,
+    payload: dict[str, Any] | None = None,
+    returncode: int | None = None,
+) -> None:
+    raise _ApiResponseError(message, payload=payload, returncode=returncode)
 
 
 class XApiClient:
@@ -100,8 +217,12 @@ class XApiClient:
         mcp_call: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
         xurl_command: list[str] | None = None,
         api_call_budget: int = 30,
-        sleep_seconds: float = 1.0,
+        sleep_seconds: float = 2.5,
         max_retries: int = 0,
+        rate_limit_retries: int = 2,
+        transient_retries: int = 1,
+        rate_limit_backoff_seconds: float = 60.0,
+        transient_backoff_seconds: float = 20.0,
         auth: str | None = None,
     ) -> None:
         self._mcp_call = mcp_call
@@ -109,6 +230,10 @@ class XApiClient:
         self._api_call_budget = api_call_budget
         self._sleep_seconds = sleep_seconds
         self._max_retries = max(0, max_retries)
+        self._rate_limit_retries = max(0, rate_limit_retries)
+        self._transient_retries = max(0, transient_retries)
+        self._rate_limit_backoff_seconds = max(1.0, rate_limit_backoff_seconds)
+        self._transient_backoff_seconds = max(1.0, transient_backoff_seconds)
         self._auth = auth
         self.calls_attempted = 0
         self.calls_made = 0
@@ -135,49 +260,124 @@ class XApiClient:
     def _record_attempt(self) -> None:
         self.calls_attempted += 1
 
-    def _request(self, tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
-        self._check_budget()
-        last_error: Exception | None = None
-        attempts = 1 + self._max_retries
+    def _backoff_seconds(self, kind: ErrorKind, attempt: int) -> float:
+        base = (
+            self._rate_limit_backoff_seconds
+            if kind == "rate_limit"
+            else self._transient_backoff_seconds
+        )
+        return min(300.0, base * (2 ** max(0, attempt - 1)))
 
-        for attempt in range(attempts):
+    def _handle_response_errors(self, payload: dict[str, Any]) -> None:
+        if "errors" not in payload or payload.get("data") or payload.get("includes"):
+            return
+        missing_id = _errors_indicate_not_found(payload["errors"])
+        if missing_id:
+            raise PostNotFoundError(
+                missing_id,
+                json.dumps(payload["errors"], ensure_ascii=False),
+            )
+        detail = json.dumps(payload["errors"], ensure_ascii=False)
+        _raise_classified_error(detail, payload)
+
+    def _request(self, tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
+        rate_limit_attempts = 0
+        transient_attempts = 0
+        generic_attempts = 0
+        max_generic_attempts = 1 + self._max_retries
+        last_error: str | None = None
+
+        while True:
+            self._check_budget()
             self._record_attempt()
             try:
                 if self._mcp_call is not None:
                     payload = self._mcp_call(tool_name, params)
                 else:
                     payload = self._xurl_request(tool_name, params)
+                self._handle_response_errors(payload)
                 if self._sleep_seconds:
                     time.sleep(self._sleep_seconds)
-                if "errors" in payload and not payload.get("data") and not payload.get("includes"):
-                    missing_id = _errors_indicate_not_found(payload["errors"])
-                    if missing_id:
-                        raise PostNotFoundError(
-                            missing_id,
-                            json.dumps(payload["errors"], ensure_ascii=False),
-                        )
-                    detail = json.dumps(payload["errors"], ensure_ascii=False)
-                    _raise_classified_error(detail, payload)
                 self.calls_made += 1
                 return payload
             except ApiBudgetExceeded:
                 raise
             except PostNotFoundError:
                 raise
-            except (ApiRateLimitError, ApiFatalError):
-                raise
+            except _ApiResponseError as exc:
+                kind = _classify_api_error(
+                    exc.message, exc.payload, exc.returncode
+                )
+                last_error = exc.message
+                if kind == "rate_limit" and rate_limit_attempts < self._rate_limit_retries:
+                    rate_limit_attempts += 1
+                    wait = self._backoff_seconds(kind, rate_limit_attempts)
+                    logger.warning(
+                        "Rate limited (%s). Waiting %.0fs, retry %s/%s",
+                        exc.message,
+                        wait,
+                        rate_limit_attempts,
+                        self._rate_limit_retries,
+                    )
+                    time.sleep(wait)
+                    continue
+                if kind == "transient" and transient_attempts < self._transient_retries:
+                    transient_attempts += 1
+                    wait = self._backoff_seconds(kind, transient_attempts)
+                    logger.warning(
+                        "Transient API error (%s). Waiting %.0fs, retry %s/%s",
+                        exc.message,
+                        wait,
+                        transient_attempts,
+                        self._transient_retries,
+                    )
+                    time.sleep(wait)
+                    continue
+                if kind == "rate_limit":
+                    raise ApiRateLimitError(exc.message) from exc
+                raise ApiFatalError(exc.message) from exc
             except Exception as exc:
                 missing_id = _errors_indicate_not_found(_coerce_errors(exc))
                 if missing_id:
                     raise PostNotFoundError(missing_id, str(exc)) from exc
                 message = str(exc)
                 kind = _classify_api_error(message)
+                last_error = message
+                if kind == "rate_limit" and rate_limit_attempts < self._rate_limit_retries:
+                    rate_limit_attempts += 1
+                    wait = self._backoff_seconds(kind, rate_limit_attempts)
+                    logger.warning(
+                        "Rate limited (%s). Waiting %.0fs, retry %s/%s",
+                        message,
+                        wait,
+                        rate_limit_attempts,
+                        self._rate_limit_retries,
+                    )
+                    time.sleep(wait)
+                    continue
+                if kind == "transient" and transient_attempts < self._transient_retries:
+                    transient_attempts += 1
+                    wait = self._backoff_seconds(kind, transient_attempts)
+                    logger.warning(
+                        "Transient API error (%s). Waiting %.0fs, retry %s/%s",
+                        message,
+                        wait,
+                        transient_attempts,
+                        self._transient_retries,
+                    )
+                    time.sleep(wait)
+                    continue
                 if kind == "rate_limit":
                     raise ApiRateLimitError(message) from exc
-                if kind == "fatal" or attempt >= attempts - 1:
+                generic_attempts += 1
+                if generic_attempts >= max_generic_attempts:
                     raise ApiFatalError(message) from exc
-                last_error = exc
-                logger.warning("API error (attempt %s/%s): %s", attempt + 1, attempts, exc)
+                logger.warning(
+                    "API error (attempt %s/%s): %s",
+                    generic_attempts,
+                    max_generic_attempts,
+                    exc,
+                )
                 time.sleep(self._sleep_seconds)
 
         raise ApiFatalError(f"X API request failed: {last_error}")
@@ -228,7 +428,11 @@ class XApiClient:
 
         if result.returncode != 0 or payload is None:
             detail = stderr or stdout or f"xurl exited {result.returncode}"
-            _raise_classified_error(detail, payload)
+            _raise_classified_error(
+                detail,
+                payload,
+                returncode=result.returncode if result.returncode != 0 else None,
+            )
 
         return payload
 
@@ -252,10 +456,8 @@ class XApiClient:
             "user.fields": USER_FIELDS,
             "expansions": SEARCH_EXPANSIONS,
         }
-        token = pagination_token
-        if token:
-            params["pagination_token"] = token
-            params["next_token"] = token
+        if pagination_token:
+            params["next_token"] = pagination_token
         if since_id:
             params["since_id"] = since_id
         if until_id:

@@ -35,6 +35,10 @@ class GraphCollector:
                 api_call_budget=config.api_call_budget,
                 sleep_seconds=config.sleep_seconds,
                 max_retries=config.max_retries,
+                rate_limit_retries=config.rate_limit_retries,
+                transient_retries=config.transient_retries,
+                rate_limit_backoff_seconds=config.rate_limit_backoff_seconds,
+                transient_backoff_seconds=config.transient_backoff_seconds,
             )
 
     def run_once(self) -> dict[str, Any]:
@@ -69,9 +73,16 @@ class GraphCollector:
         except ApiBudgetExceeded:
             summary["stopped_reason"] = "api_budget_exhausted"
             search_ok = False
-        except (ApiRateLimitError, ApiFatalError) as exc:
+        except ApiRateLimitError as exc:
             summary["stopped_reason"] = type(exc).__name__
-            logger.error("Stopping run immediately (no retries): %s", exc)
+            logger.error(
+                "Rate limit persisted after backoff retries — try again later: %s",
+                exc,
+            )
+            search_ok = False
+        except ApiFatalError as exc:
+            summary["stopped_reason"] = type(exc).__name__
+            logger.error("Stopping run immediately: %s", exc)
             search_ok = False
         except RuntimeError as exc:
             summary["stopped_reason"] = "search_failed"
@@ -87,7 +98,13 @@ class GraphCollector:
                 summary["expansions_done"] = self._process_expansion_queue()
             except ApiBudgetExceeded:
                 summary["stopped_reason"] = "api_budget_exhausted"
-            except (ApiRateLimitError, ApiFatalError) as exc:
+            except ApiRateLimitError as exc:
+                summary["stopped_reason"] = type(exc).__name__
+                logger.error(
+                    "Rate limit persisted after backoff retries — try again later: %s",
+                    exc,
+                )
+            except ApiFatalError as exc:
                 summary["stopped_reason"] = type(exc).__name__
                 logger.error("Stopping expansions immediately: %s", exc)
 

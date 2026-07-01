@@ -30,7 +30,7 @@ class CollectorConfig:
     search_mode: str = "recent"
     sort_order: str = "recency"
     search_page_size: int = 100
-    max_search_pages_per_run: int = 3
+    max_search_pages_per_run: int = 1
 
     # Engagement expansion thresholds (score = likes + 2*RT + 3*quotes + replies).
     min_engagement_to_expand: int = 25
@@ -51,8 +51,12 @@ class CollectorConfig:
 
     # Hard budget: every HTTP attempt counts (failed calls still cost credits).
     api_call_budget: int = 30
-    sleep_seconds: float = 1.0
+    sleep_seconds: float = 2.5
     max_retries: int = 0
+    rate_limit_retries: int = 2
+    transient_retries: int = 1
+    rate_limit_backoff_seconds: float = 60.0
+    transient_backoff_seconds: float = 20.0
 
     edge_types: tuple[str, ...] = ("MENTION", "REPLY", "RETWEET", "QUOTE", "LIKE")
 

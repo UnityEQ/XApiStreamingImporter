@@ -52,7 +52,19 @@ X search query
     → enrich nodes (optional)        ← add primary_interaction for Gephi node colors
 ```
 
-**Default mode is backward crawl** — each run starts at the most recent matching posts and pages older. Re-run the same query to keep going back in time (last 7 days with `--search-mode recent`).
+**Default mode is backward crawl** — each run starts at the most recent matching posts and pages older. Re-run the same query to keep going back in time (last 7 days with `--search-mode recent`). Each run fetches **one search page by default** (~100 posts); use `--search-pages 3` to go deeper in a single run (more API calls, higher rate-limit risk).
+
+### Edge types: free vs paid
+
+| Edge | With `--search-only` | Needs expansion (extra API) |
+|------|----------------------|---------------------------|
+| `MENTION` | Yes — `@user` in post text | — |
+| `REPLY` | Yes — if the post is a reply | — |
+| `RETWEET` | Yes — if the post is a retweet | Also: likers-of-post style reposter lists |
+| `QUOTE` | Yes — if the post is a quote tweet | Also: separate quoter lists |
+| `LIKE` | No | Yes — likers endpoint |
+
+`--search-only` still captures RT/REPLY/QUOTE when those posts appear in search results. It skips **expansion** calls that fetch who liked / reposted / quoted a high-engagement tweet.
 
 ---
 
@@ -114,7 +126,7 @@ python -m x_graph.cli enrich -q "digital circus lang:en"
 
 ### Enrich nodes for Gephi colors (free)
 
-Adds `primary_interaction` to nodes — each user's most common **outgoing** edge type (`MENTION`, `REPLY`, etc.). Use this so nodes can be colored by interaction in Gephi (edges already have `Interaction`; nodes do not until enriched).
+Adds `primary_interaction` to nodes — each user's most common **outgoing** edge type (`MENTION`, `REPLY`, etc.). Use this so nodes can be colored by interaction in Gephi (edges already have `Interaction`; nodes do not until enriched). On fan/search topics, this often skews to `MENTION` (one RT post can still add several `@mention` edges). Users with only incoming edges get `none`. For RT/REPLY/QUOTE visibility, color **edges** by `interaction`, not nodes only.
 
 ```bash
 python -m x_graph.cli enrich -q "digital circus lang:en"
@@ -262,7 +274,7 @@ enrich_nodes(
 | `--dry-run` | off | Plan only — zero API calls |
 | `--search-only` | off | Skip expansions (cheapest live mode) |
 | `--api-budget` | `30` | Max HTTP attempts per run (failures count) |
-| `--search-pages` | `3` | Pages per run × 100 posts, going older |
+| `--search-pages` | `1` | Pages per run × 100 posts, going older (raise for deeper single runs) |
 | `--expansions` | `5` | Posts to expand per run |
 | `--min-engagement` | `25` | Min score to queue expansion |
 | `--search-mode` | `recent` | `recent` (7-day) or `all` (full archive, app-only) |
@@ -301,6 +313,14 @@ python -m x_graph.cli status -q "digital circus lang:en"
 python -m x_graph.cli export -q "digital circus lang:en"
 ```
 
+`status` returns `nodes`, `edges`, `seen_posts`, pagination cursor, and `has_more_older_posts`. Post timestamps (`created_at`) live in `state.db` → `seen_posts`, not in the exported CSVs — query them for crawl window stats:
+
+```bash
+python -c "import sqlite3; db=sqlite3.connect('data/queries/digital-circus-lang-en/state.db'); print(db.execute('SELECT MIN(created_at), MAX(created_at), COUNT(*) FROM seen_posts').fetchone())"
+```
+
+Per-run API usage is logged in `state.db` → `run_log` (`api_calls_attempted`, `api_calls_ok`). The tool counts **HTTP attempts**, not dollars — check [developer.x.com](https://developer.x.com) billing for actual spend.
+
 ---
 
 ## Credit safety
@@ -309,12 +329,15 @@ python -m x_graph.cli export -q "digital circus lang:en"
 |------------|----------|
 | `--confirm-spend` | Blocks live API unless you explicitly opt in |
 | `--dry-run` / `X_GRAPH_OFFLINE=1` | Zero API calls |
-| No retries (`max_retries=0`) | One failure → stop (no 3× retry storm) |
+| Default `--search-pages 1` | One search request per run — re-run to page backward |
+| No generic retries (`max_retries=0`) | Auth/404 errors don't retry in a loop |
+| Rate-limit backoff | Up to 2 retries, 60s → 120s wait on 429 / throttle |
+| Transient backoff | 1 retry, 20s wait on `request failed` / 502 / 503 |
 | Search fail → skip expansions | Won't expand after a failed search |
 | One expansion error → stop | Won't walk the whole queue on errors |
 | Run lock (`.collect.lock`) | Blocks concurrent collects on same query |
-| `api_calls_attempted` | Counts every HTTP attempt in run summary |
-| 1s delay between calls | Reduces rate-limit hits |
+| `api_calls_attempted` | Counts every HTTP attempt (retries count too) |
+| 2.5s delay after successful calls | Reduces rate-limit hits between pages |
 | Retweet expansion | Uses **original** tweet ID, not RT wrapper |
 | Deleted posts | Skipped gracefully — no crash, no retry loop |
 
@@ -343,8 +366,8 @@ export X_GRAPH_OFFLINE=1       # macOS / Linux
 | `completed` | Normal finish |
 | `dry_run` | No API calls made |
 | `api_budget_exhausted` | Hit `--api-budget` |
-| `ApiRateLimitError` | Rate limited — stopped immediately |
-| `ApiFatalError` | Auth/network error — stopped immediately |
+| `ApiRateLimitError` | Rate limited after backoff retries exhausted |
+| `ApiFatalError` | Fatal error after retries (auth, etc.) |
 | `search_failed` | Search failed — expansions were skipped |
 
 ---
@@ -414,6 +437,10 @@ python -m x_graph.cli enrich -q "digital circus lang:en" --in-place
 - **Node colors:** Appearance → Nodes → Color → Partition → `primary_interaction` (after `enrich`)
 - **Node size:** Statistics → Degree → Run → Appearance → Nodes → Size → Ranking → Degree
 - **Hub labels only:** Appearance → Labels → Size → Ranking → `degree` (raise max threshold until low-degree labels disappear)
+
+### Move a single node (Overview)
+
+Use the **arrow / selection** tool on the left of the graph — not the **hand** tool (hand pans the whole view). Stop ForceAtlas 2 before dragging. Zoom in so you grab the node circle, not empty space.
 
 ### Wrong Gephi version opens?
 
@@ -488,8 +515,11 @@ gephi-x-mcp/
 | Problem | Fix |
 |---------|-----|
 | `Refusing live X API calls without --confirm-spend` | Add `--confirm-spend`, or use `--dry-run` |
-| Credits burned unexpectedly | Use `--search-only`, lower `--api-budget`, never run two collects at once |
-| `Error: request failed` | Rate limit or outage — wait 1+ min, retry with `--search-only --api-budget 5` |
+| Credits burned unexpectedly | Use `--search-only`, `--search-pages 1`, lower `--api-budget`, never run two collects at once |
+| `Error: request failed` / `ApiFatalError` on page 2 | Often rate limit or stale pagination — auto-retries once; if it persists, wait 1+ min and retry with `--search-pages 1`, or `--fresh` to reset cursor |
+| `ApiRateLimitError` after long waits | Wait several minutes, then collect again with `--search-pages 1` |
+| Only `MENTION` in `primary_interaction` | Expected on mention-heavy queries — partition **edges** by `interaction`; RT/REPLY/QUOTE are still in `x_graph_edges.csv` |
+| Dragging moves whole graph in Gephi | Switch from hand tool to selection (arrow); stop layout first |
 | `Another collect run is already active` | Wait, or delete stale `data/queries/<slug>/.collect.lock` |
 | `UnicodeDecodeError` on Windows | Fixed — ensure you have the latest `x_client.py` |
 | Expansion "post not found" | Deleted tweet — skipped automatically |

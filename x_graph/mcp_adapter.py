@@ -12,7 +12,7 @@ def make_mcp_client(
     call_mcp_tool: Callable[[str, str, dict[str, Any]], Any],
     *,
     api_call_budget: int = 200,
-    sleep_seconds: float = 0.5,
+    sleep_seconds: float = 2.5,
 ) -> XApiClient:
     """Wrap a host MCP `call_mcp_tool(server, tool, args)` function."""
 

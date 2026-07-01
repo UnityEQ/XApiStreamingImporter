@@ -47,8 +47,8 @@ def _build_parser() -> argparse.ArgumentParser:
     collect.add_argument(
         "--search-pages",
         type=int,
-        default=3,
-        help="Search pages per run (100 posts/page, goes older each page)",
+        default=1,
+        help="Search pages per run (100 posts/page, goes older each page; use 1 to reduce rate limits)",
     )
     collect.add_argument(
         "--expansions",
