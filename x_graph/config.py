@@ -28,9 +28,19 @@ class CollectorConfig:
 
     # Search: "recent" (7-day, OAuth user/app) or "all" (full archive, app-only).
     search_mode: str = "recent"
+    # Full-archive only: step back in fixed day windows when a page is not full.
+    auto_expand_archive: bool = True
+    archive_chunk_days: int = 30
+    lookback_days: int | None = 365
+    # Cap empty/sparse window steps per run so archive crawl cannot burn the
+    # whole budget walking months with no (or all-duplicate) results.
+    max_empty_archive_windows_per_run: int = 3
     sort_order: str = "recency"
     search_page_size: int = 100
     max_search_pages_per_run: int = 1
+    # Stop paging within a run when a search page yields zero new posts.
+    # Prevents re-walking already-seen history after a completed crawl.
+    stop_on_duplicate_page: bool = True
 
     # Engagement expansion thresholds (score = likes + 2*RT + 3*quotes + replies).
     min_engagement_to_expand: int = 25
@@ -51,6 +61,12 @@ class CollectorConfig:
 
     # Hard budget: every HTTP attempt counts (failed calls still cost credits).
     api_call_budget: int = 30
+    # Soft dollar cap (estimated from resources returned). None = no dollar limit.
+    # This is NOT X's official bill — verify on console.x.com.
+    max_spend_usd: float | None = None
+    # Pay-per-use unit prices used only for estimates / --max-spend stopping.
+    post_read_usd: float = 0.005
+    user_read_usd: float = 0.01
     sleep_seconds: float = 2.5
     max_retries: int = 0
     rate_limit_retries: int = 2

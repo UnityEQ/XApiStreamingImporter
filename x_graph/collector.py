@@ -4,6 +4,14 @@ import logging
 import random
 from typing import Any
 
+from x_graph.archive_window import (
+    advance_archive_window,
+    archive_window_from_state,
+    clear_search_exhausted,
+    crawl_has_more,
+    crawl_is_exhausted,
+    mark_search_exhausted,
+)
 from x_graph.config import CollectorConfig
 from x_graph.graph import InteractionEdge, InteractionGraph
 from x_graph.state import StateStore
@@ -13,6 +21,7 @@ from x_graph.x_client import (
     ApiBudgetExceeded,
     ApiFatalError,
     ApiRateLimitError,
+    ApiSpendExceeded,
     PostNotFoundError,
     XApiClient,
 )
@@ -31,14 +40,19 @@ class GraphCollector:
         elif config.dry_run:
             self.client = OfflineXApiClient()
         else:
+            auth = "app" if config.search_mode == "all" else None
             self.client = XApiClient(
                 api_call_budget=config.api_call_budget,
+                max_spend_usd=config.max_spend_usd,
+                post_read_usd=config.post_read_usd,
+                user_read_usd=config.user_read_usd,
                 sleep_seconds=config.sleep_seconds,
                 max_retries=config.max_retries,
                 rate_limit_retries=config.rate_limit_retries,
                 transient_retries=config.transient_retries,
                 rate_limit_backoff_seconds=config.rate_limit_backoff_seconds,
                 transient_backoff_seconds=config.transient_backoff_seconds,
+                auth=auth,
             )
 
     def run_once(self) -> dict[str, Any]:
@@ -48,6 +62,15 @@ class GraphCollector:
 
     def _run_once_locked(self) -> dict[str, Any]:
         self._prepare_run()
+        if hasattr(self.client, "calls_attempted"):
+            self.client.calls_attempted = 0
+            self.client.calls_made = 0
+        if hasattr(self.client, "estimated_spend_usd"):
+            self.client.estimated_spend_usd = 0.0
+            self.client.estimated_posts = 0
+            self.client.estimated_users = 0
+            if hasattr(self.client, "last_response_spend_usd"):
+                self.client.last_response_spend_usd = 0.0
         if self.config.dry_run:
             logger.info("DRY RUN — no X API calls will be made")
             return self._dry_run_summary()
@@ -64,14 +87,51 @@ class GraphCollector:
             "expansions_done": 0,
             "api_calls_attempted": 0,
             "api_calls_ok": 0,
+            "estimated_spend_usd": 0.0,
+            "estimated_spend_total_usd": self._load_total_spend(),
+            "max_spend_usd": self.config.max_spend_usd,
+            "pricing_note": (
+                "estimated from post/user resources returned; not official X bill"
+            ),
             "stopped_reason": "completed",
         }
         search_ok = True
+
+        # Avoid re-burning credits when a backward crawl already finished.
+        # --fresh and --incremental always search.
+        if (
+            self.config.collection_mode == "backward"
+            and not self.config.fresh
+            and crawl_is_exhausted(
+                self.state,
+                search_mode=self.config.search_mode,
+                auto_expand_archive=self.config.auto_expand_archive,
+                lookback_days=self.config.lookback_days,
+            )
+        ):
+            logger.info(
+                "Search already exhausted for this query — skipping API calls. "
+                "Use --fresh to restart from newest, or --incremental for new posts only."
+            )
+            summary["stopped_reason"] = "search_exhausted"
+            summary["api_calls_attempted"] = self.client.calls_attempted
+            summary["api_calls_ok"] = self.client.calls_made
+            summary.update(self.state.stats())
+            summary["has_more_older_posts"] = False
+            if self.config.search_mode == "all" and self.config.auto_expand_archive:
+                summary["archive_window_start"] = self.state.get_meta("archive_window_start")
+                summary["archive_window_end"] = self.state.get_meta("archive_window_end")
+            self.state.log_event("run_complete", summary)
+            return summary
 
         try:
             summary["search_posts_new"] = self._collect_search_pages()
         except ApiBudgetExceeded:
             summary["stopped_reason"] = "api_budget_exhausted"
+            search_ok = False
+        except ApiSpendExceeded as exc:
+            summary["stopped_reason"] = "max_spend_reached"
+            logger.info("Stopping: %s", exc)
             search_ok = False
         except ApiRateLimitError as exc:
             summary["stopped_reason"] = type(exc).__name__
@@ -98,6 +158,9 @@ class GraphCollector:
                 summary["expansions_done"] = self._process_expansion_queue()
             except ApiBudgetExceeded:
                 summary["stopped_reason"] = "api_budget_exhausted"
+            except ApiSpendExceeded as exc:
+                summary["stopped_reason"] = "max_spend_reached"
+                logger.info("Stopping expansions: %s", exc)
             except ApiRateLimitError as exc:
                 summary["stopped_reason"] = type(exc).__name__
                 logger.error(
@@ -110,9 +173,44 @@ class GraphCollector:
 
         summary["api_calls_attempted"] = self.client.calls_attempted
         summary["api_calls_ok"] = self.client.calls_made
+        summary["estimated_spend_usd"] = getattr(
+            self.client, "estimated_spend_usd", 0.0
+        )
+        summary["estimated_posts_billed"] = getattr(
+            self.client, "estimated_posts", 0
+        )
+        summary["estimated_users_billed"] = getattr(
+            self.client, "estimated_users", 0
+        )
+        summary["estimated_spend_total_usd"] = self._add_total_spend(
+            float(summary["estimated_spend_usd"])
+        )
         summary.update(self.state.stats())
+        summary["has_more_older_posts"] = crawl_has_more(
+            self.state,
+            search_mode=self.config.search_mode,
+            auto_expand_archive=self.config.auto_expand_archive,
+            lookback_days=self.config.lookback_days,
+        )
+        if self.config.search_mode == "all" and self.config.auto_expand_archive:
+            summary["archive_window_start"] = self.state.get_meta("archive_window_start")
+            summary["archive_window_end"] = self.state.get_meta("archive_window_end")
         self.state.log_event("run_complete", summary)
         return summary
+
+    def _load_total_spend(self) -> float:
+        raw = self.state.get_meta("estimated_spend_total_usd")
+        if not raw:
+            return 0.0
+        try:
+            return float(raw)
+        except ValueError:
+            return 0.0
+
+    def _add_total_spend(self, run_spend: float) -> float:
+        total = round(self._load_total_spend() + max(0.0, run_spend), 6)
+        self.state.set_meta("estimated_spend_total_usd", f"{total:.6f}")
+        return total
 
     def _dry_run_summary(self) -> dict[str, Any]:
         batch = self.state.pop_expansion_batch(self.config.max_expansions_per_run)
@@ -123,6 +221,15 @@ class GraphCollector:
                 item["engagement"],
                 item["priority"],
             )
+        from x_graph.pricing import PricingConfig
+
+        pricing = PricingConfig(
+            post_read_usd=self.config.post_read_usd,
+            user_read_usd=self.config.user_read_usd,
+        )
+        page_ceiling = pricing.estimate_search_page_ceiling(
+            self.config.search_page_size
+        )
         return {
             "query": self.config.query,
             "work_dir": str(self.config.work_dir),
@@ -136,6 +243,17 @@ class GraphCollector:
             ),
             "api_calls_attempted": 0,
             "api_calls_ok": 0,
+            "max_spend_usd": self.config.max_spend_usd,
+            "estimated_spend_total_usd": self._load_total_spend(),
+            "pricing": {
+                "post_read_usd": self.config.post_read_usd,
+                "user_read_usd": self.config.user_read_usd,
+                "worst_case_per_search_page_usd": round(page_ceiling, 4),
+                "note": (
+                    "X bills per resource returned (~$0.005/post, ~$0.01/user). "
+                    "--api-budget is HTTP attempts; --max-spend is an estimate cap."
+                ),
+            },
             **self.state.stats(),
         }
 
@@ -143,6 +261,7 @@ class GraphCollector:
         stored_query = self.state.get_meta("query")
         if self.config.fresh:
             self.state.reset_search_cursors()
+            clear_search_exhausted(self.state)
             self.state.log_event("fresh_start", {"query": self.config.query})
         elif stored_query and stored_query != self.config.query:
             logger.warning(
@@ -152,9 +271,13 @@ class GraphCollector:
                 self.config.query,
             )
             self.state.reset_search_cursors()
+            clear_search_exhausted(self.state)
 
         if self.config.collection_mode == "backward":
             self.state.clear_meta("since_id")
+        elif self.config.collection_mode == "incremental":
+            # Incremental always looks for newer posts; clear exhausted flag.
+            clear_search_exhausted(self.state)
 
     def _search_pages_this_run(self) -> int:
         if self.config.search_only:
@@ -177,6 +300,44 @@ class GraphCollector:
             return 0
         return min(self.config.max_expansions_per_run, remaining // 3)
 
+    def _search_time_bounds(self) -> tuple[str | None, str | None]:
+        if (
+            self.config.search_mode != "all"
+            or not self.config.auto_expand_archive
+            or self.config.collection_mode == "incremental"
+        ):
+            return None, None
+        return archive_window_from_state(
+            self.state,
+            chunk_days=self.config.archive_chunk_days,
+            lookback_days=self.config.lookback_days,
+        )
+
+    def _maybe_expand_archive_window(self, posts_on_page: int) -> bool:
+        if (
+            self.config.search_mode != "all"
+            or not self.config.auto_expand_archive
+            or self.config.collection_mode == "incremental"
+        ):
+            return False
+        if posts_on_page >= self.config.search_page_size:
+            return False
+        expanded = advance_archive_window(
+            self.state,
+            chunk_days=self.config.archive_chunk_days,
+            lookback_days=self.config.lookback_days,
+        )
+        if expanded:
+            start = self.state.get_meta("archive_window_start")
+            end = self.state.get_meta("archive_window_end")
+            logger.info(
+                "Sparse page (%s posts) — expanding archive window to %s → %s",
+                posts_on_page,
+                start,
+                end,
+            )
+        return expanded
+
     def _collect_search_pages(self) -> int:
         new_posts = 0
         pagination_token = self.state.get_meta("search_pagination_token")
@@ -185,7 +346,10 @@ class GraphCollector:
             since_id = self.state.get_meta("since_id")
 
         page_limit = self._search_pages_this_run()
+        empty_archive_windows = 0
         for page in range(page_limit):
+            request_token = pagination_token
+            start_time, end_time = self._search_time_bounds()
             try:
                 payload = self.client.search_posts(
                     self.config.query,
@@ -193,6 +357,8 @@ class GraphCollector:
                     max_results=self.config.search_page_size,
                     pagination_token=pagination_token,
                     since_id=since_id,
+                    start_time=start_time,
+                    end_time=end_time,
                     sort_order=self.config.sort_order,
                 )
             except ApiBudgetExceeded:
@@ -203,6 +369,9 @@ class GraphCollector:
                 logger.error("Search failed on page %s: %s", page + 1, exc)
                 raise
 
+            # Any successful search means we are actively crawling again.
+            clear_search_exhausted(self.state)
+
             posts = payload.get("data") or []
             includes = payload.get("includes") or {}
             users = {u["id"]: u for u in includes.get("users", [])}
@@ -211,12 +380,14 @@ class GraphCollector:
             for user in users.values():
                 self._persist_user(user)
 
+            page_new = 0
             for post in posts:
                 if self.state.mark_post_seen(
                     post["id"],
                     engagement=InteractionGraph.engagement_score(post.get("public_metrics")),
                     created_at=post.get("created_at"),
                 ):
+                    page_new += 1
                     new_posts += 1
                     self._ingest_post_edges(post, users, ref_posts)
 
@@ -227,10 +398,54 @@ class GraphCollector:
                 if not current or int(newest_id) > int(current):
                     self.state.set_meta("since_id", str(newest_id))
 
+            # Zero-new page: stop paging this run so we do not re-walk history.
+            # Common after a completed crawl restarts from the newest page.
+            if (
+                self.config.stop_on_duplicate_page
+                and self.config.collection_mode == "backward"
+                and posts
+                and page_new == 0
+            ):
+                logger.info(
+                    "Search page returned %s already-seen posts (0 new) — "
+                    "stopping to avoid re-crawl credit burn. Use --fresh to restart.",
+                    len(posts),
+                )
+                self.state.set_meta("search_pagination_token", "")
+                # Head of results already fully ingested: try next archive window
+                # once, otherwise mark exhausted so future runs skip free.
+                if not request_token:
+                    if self._maybe_expand_archive_window(len(posts)):
+                        empty_archive_windows += 1
+                        if (
+                            empty_archive_windows
+                            >= self.config.max_empty_archive_windows_per_run
+                        ):
+                            break
+                        pagination_token = None
+                        continue
+                    mark_search_exhausted(self.state)
+                break
+
             next_token = meta.get("next_token") or meta.get("pagination_token")
             if not next_token or not posts:
                 self.state.set_meta("search_pagination_token", "")
+                if not posts:
+                    empty_archive_windows += 1
+                if self._maybe_expand_archive_window(len(posts)):
+                    if empty_archive_windows >= self.config.max_empty_archive_windows_per_run:
+                        logger.info(
+                            "Hit %s empty/sparse archive windows this run — "
+                            "pausing. Re-run collect to continue stepping older.",
+                            empty_archive_windows,
+                        )
+                        break
+                    pagination_token = None
+                    continue
+                mark_search_exhausted(self.state)
                 break
+            # Full page with some new posts — reset empty-window streak.
+            empty_archive_windows = 0
             pagination_token = next_token
             self.state.set_meta("search_pagination_token", next_token)
 

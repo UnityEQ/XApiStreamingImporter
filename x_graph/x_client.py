@@ -12,6 +12,7 @@ from typing import Any, Callable, Literal
 from urllib.parse import urlencode
 
 from x_graph.config import POST_FIELDS, SEARCH_EXPANSIONS, USER_FIELDS
+from x_graph.pricing import PricingConfig, estimate_payload_usd
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,10 @@ MCP_TOOL_PATHS: dict[str, str] = {
 
 class ApiBudgetExceeded(Exception):
     """Raised when the per-run API call budget is exhausted."""
+
+
+class ApiSpendExceeded(Exception):
+    """Raised when the estimated dollar spend cap is reached."""
 
 
 class ApiRateLimitError(Exception):
@@ -208,6 +213,84 @@ def _raise_classified_error(
     raise _ApiResponseError(message, payload=payload, returncode=returncode)
 
 
+def _clean_xurl_text(text: str) -> str:
+    """Strip xurl noise so embedded API JSON can be parsed."""
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.lower() in {"error: request failed", "error: request failed."}:
+            continue
+        if stripped.lower().startswith("error: auth error:"):
+            return stripped
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _parse_xurl_payload(stdout: str, stderr: str) -> tuple[dict[str, Any] | None, str]:
+    """Parse JSON from xurl stdout/stderr, tolerating malformed error wrappers."""
+    chunks = [_clean_xurl_text(stdout), _clean_xurl_text(stderr)]
+    combined = "\n".join(chunk for chunk in chunks if chunk)
+    for candidate in chunks + ([combined] if combined else []):
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            match = re.search(r"\{[\s\S]*\}", candidate)
+            if not match:
+                continue
+            try:
+                parsed = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                continue
+        if isinstance(parsed, dict):
+            return parsed, combined or candidate
+    return None, combined or stderr or stdout
+
+
+def _format_api_error_detail(
+    payload: dict[str, Any] | None,
+    fallback: str,
+    *,
+    auth: str | None = None,
+    tool_name: str | None = None,
+) -> str:
+    if not payload:
+        if "bearer token not found" in fallback.lower():
+            return (
+                "Bearer token not found for app-only auth. "
+                "Full-archive search (--search-mode all) requires a bearer token "
+                "from developer.x.com → your app → Keys and tokens: "
+                "npx -y @xdevplatform/xurl auth app-only <BEARER_TOKEN>"
+            )
+        return fallback
+
+    title = str(payload.get("title", "")).strip()
+    detail = str(payload.get("detail", "")).strip()
+    status = payload.get("status")
+    parts = [part for part in (title, detail) if part]
+    message = ": ".join(parts) if parts else fallback
+    if status is not None:
+        message = f"{message} (HTTP {status})"
+
+    lowered = message.lower()
+    if (
+        tool_name == "search_posts_all"
+        or "unsupported authentication" in lowered
+        or (
+            auth != "app"
+            and "oauth 2.0 user context is forbidden" in lowered
+        )
+    ):
+        message += (
+            ". Full-archive search requires app-only bearer auth "
+            "(--auth app). Use --search-mode recent for the last 7 days "
+            "with OAuth user auth, or store a bearer token via "
+            "xurl auth app-only <BEARER_TOKEN>"
+        )
+    return message
+
+
 class XApiClient:
     """Thin client over X API v2, mirroring xapi MCP tool semantics."""
 
@@ -217,6 +300,9 @@ class XApiClient:
         mcp_call: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
         xurl_command: list[str] | None = None,
         api_call_budget: int = 30,
+        max_spend_usd: float | None = None,
+        post_read_usd: float = 0.005,
+        user_read_usd: float = 0.01,
         sleep_seconds: float = 2.5,
         max_retries: int = 0,
         rate_limit_retries: int = 2,
@@ -228,6 +314,11 @@ class XApiClient:
         self._mcp_call = mcp_call
         self._xurl_command = xurl_command or self._default_xurl_command()
         self._api_call_budget = api_call_budget
+        self._max_spend_usd = max_spend_usd
+        self._pricing = PricingConfig(
+            post_read_usd=post_read_usd,
+            user_read_usd=user_read_usd,
+        )
         self._sleep_seconds = sleep_seconds
         self._max_retries = max(0, max_retries)
         self._rate_limit_retries = max(0, rate_limit_retries)
@@ -237,6 +328,13 @@ class XApiClient:
         self._auth = auth
         self.calls_attempted = 0
         self.calls_made = 0
+        # Estimated USD from resources returned this run (not official billing).
+        self.estimated_spend_usd = 0.0
+        self.estimated_posts = 0
+        self.estimated_users = 0
+        self.last_response_spend_usd = 0.0
+        # Hint for logging / dry-run only (not a hard pre-call gate on first request).
+        self.next_call_ceiling_usd = self._pricing.estimate_search_page_ceiling(100)
 
     @staticmethod
     def _default_xurl_command() -> list[str]:
@@ -256,9 +354,49 @@ class XApiClient:
             raise ApiBudgetExceeded(
                 f"API call budget exhausted ({self._api_call_budget} calls)"
             )
+        if self._max_spend_usd is not None:
+            remaining = self._max_spend_usd - self.estimated_spend_usd
+            if remaining <= 0:
+                raise ApiSpendExceeded(
+                    f"Estimated spend cap reached "
+                    f"(${self.estimated_spend_usd:.4f} / ${self._max_spend_usd:.4f})"
+                )
+            # After at least one response: stop if remaining cannot cover another
+            # similar page (uses actual last cost so we rarely overshoot the cap).
+            if (
+                self.calls_made > 0
+                and self.last_response_spend_usd > 0
+                and remaining < self.last_response_spend_usd
+            ):
+                raise ApiSpendExceeded(
+                    f"Estimated spend near cap "
+                    f"(${self.estimated_spend_usd:.4f} / ${self._max_spend_usd:.4f}; "
+                    f"remaining ${remaining:.4f} < last page ~$"
+                    f"{self.last_response_spend_usd:.4f})"
+                )
 
     def _record_attempt(self) -> None:
         self.calls_attempted += 1
+
+    def _record_payload_spend(self, payload: dict[str, Any]) -> None:
+        est = estimate_payload_usd(payload, self._pricing)
+        cost = float(est["total_usd"])
+        self.estimated_posts += int(est["posts"])
+        self.estimated_users += int(est["users"])
+        self.last_response_spend_usd = cost
+        self.estimated_spend_usd = round(self.estimated_spend_usd + cost, 6)
+        logger.info(
+            "Est. +$%.4f this response (%s posts, %s users) → run total ~$%.4f%s",
+            cost,
+            est["posts"],
+            est["users"],
+            self.estimated_spend_usd,
+            (
+                f" / cap ${self._max_spend_usd:.4f}"
+                if self._max_spend_usd is not None
+                else ""
+            ),
+        )
 
     def _backoff_seconds(self, kind: ErrorKind, attempt: int) -> float:
         base = (
@@ -296,11 +434,14 @@ class XApiClient:
                 else:
                     payload = self._xurl_request(tool_name, params)
                 self._handle_response_errors(payload)
+                self._record_payload_spend(payload)
                 if self._sleep_seconds:
                     time.sleep(self._sleep_seconds)
                 self.calls_made += 1
                 return payload
             except ApiBudgetExceeded:
+                raise
+            except ApiSpendExceeded:
                 raise
             except PostNotFoundError:
                 raise
@@ -419,19 +560,30 @@ class XApiClient:
         stdout = (result.stdout or b"").decode("utf-8", errors="replace").strip()
         stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
 
-        payload: dict[str, Any] | None = None
-        if stdout:
-            try:
-                payload = json.loads(stdout)
-            except json.JSONDecodeError:
-                payload = None
+        payload, raw_detail = _parse_xurl_payload(stdout, stderr)
+        status_code: int | None = None
+        if payload is not None:
+            payload_status = payload.get("status") or payload.get("status_code")
+            if isinstance(payload_status, int):
+                status_code = payload_status
 
         if result.returncode != 0 or payload is None:
-            detail = stderr or stdout or f"xurl exited {result.returncode}"
+            if payload and (payload.get("data") or payload.get("includes")):
+                return payload
+            detail = _format_api_error_detail(
+                payload,
+                raw_detail or stderr or stdout or f"xurl exited {result.returncode}",
+                auth=self._auth,
+                tool_name=tool_name,
+            )
             _raise_classified_error(
                 detail,
                 payload,
-                returncode=result.returncode if result.returncode != 0 else None,
+                returncode=(
+                    status_code
+                    if status_code is not None
+                    else (result.returncode if result.returncode != 0 else None)
+                ),
             )
 
         return payload
@@ -445,6 +597,8 @@ class XApiClient:
         pagination_token: str | None = None,
         since_id: str | None = None,
         until_id: str | None = None,
+        start_time: str | None = None,
+        end_time: str | None = None,
         sort_order: str = "recency",
     ) -> dict[str, Any]:
         tool = "search_posts_all" if mode == "all" else "search_posts_recent"
@@ -462,6 +616,13 @@ class XApiClient:
             params["since_id"] = since_id
         if until_id:
             params["until_id"] = until_id
+        if start_time:
+            params["start_time"] = start_time
+        if end_time:
+            params["end_time"] = end_time
+        self.next_call_ceiling_usd = self._pricing.estimate_search_page_ceiling(
+            max_results
+        )
         return self._request(tool, params)
 
     def get_liking_users(
@@ -478,6 +639,9 @@ class XApiClient:
         }
         if pagination_token:
             params["pagination_token"] = pagination_token
+        self.next_call_ceiling_usd = self._pricing.estimate_user_list_ceiling(
+            max_results
+        )
         return self._request("get_posts_liking_users", params)
 
     def get_reposted_by(
@@ -494,6 +658,9 @@ class XApiClient:
         }
         if pagination_token:
             params["pagination_token"] = pagination_token
+        self.next_call_ceiling_usd = self._pricing.estimate_user_list_ceiling(
+            max_results
+        )
         return self._request("get_posts_reposted_by", params)
 
     def get_quoted_posts(
@@ -512,6 +679,9 @@ class XApiClient:
         }
         if pagination_token:
             params["pagination_token"] = pagination_token
+        self.next_call_ceiling_usd = self._pricing.estimate_search_page_ceiling(
+            max_results
+        )
         return self._request("get_posts_quoted_posts", params)
 
 

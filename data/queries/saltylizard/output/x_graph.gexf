@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<gexf xmlns="http://www.gexf.net/1.2draft" version="1.2">
+  <graph mode="static" defaultedgetype="directed">
+    <attributes class="node">
+      <attribute id="0" title="username" type="string"/>
+      <attribute id="1" title="name" type="string"/>
+      <attribute id="2" title="profile_image_url" type="string"/>
+    </attributes>
+    <attributes class="edge">
+      <attribute id="0" title="interaction" type="string"/>
+      <attribute id="1" title="post_id" type="string"/>
+    </attributes>
+    <nodes>
+      <node id="1912208614095482882" label="eGhey_">
+        <attvalues>
+          <attvalue for="0" value="eGhey_"/>
+          <attvalue for="1" value="eGhey"/>
+          <attvalue for="2" value="https://pbs.twimg.com/profile_images/2059750392091594753/1nMdYeJc_normal.jpg"/>
+        </attvalues>
+      </node>
+      <node id="2024547516499578887" label="RJ74120113">
+        <attvalues>
+          <attvalue for="0" value="RJ74120113"/>
+          <attvalue for="1" value="RamezJ741"/>
+          <attvalue for="2" value="https://pbs.twimg.com/profile_images/2024548119741112320/RaVe9pnD_normal.jpg"/>
+        </attvalues>
+      </node>
+      <node id="1661876658314309632" label="_saltylizard_">
+        <attvalues>
+          <attvalue for="0" value="_saltylizard_"/>
+          <attvalue for="1" value="_saltylizard_"/>
+          <attvalue for="2" value="https://pbs.twimg.com/profile_images/2013714543067705348/kcpcP0z__normal.jpg"/>
+        </attvalues>
+      </node>
+      <node id="1619992211071897600" label="ThePPseedsShow">
+        <attvalues>
+          <attvalue for="0" value="ThePPseedsShow"/>
+          <attvalue for="1" value="ThePPseedsShow"/>
+          <attvalue for="2" value="https://pbs.twimg.com/profile_images/1679032648893595649/CzXvQO4d_normal.jpg"/>
+        </attvalues>
+      </node>
+      <node id="1146058067244486656" label="ryancohen">
+        <attvalues>
+          <attvalue for="0" value="ryancohen"/>
+          <attvalue for="1" value="ryancohen"/>
+          <attvalue for="2" value="https://pbs.twimg.com/profile_images/2052946104031789057/AF9ba7So_normal.jpg"/>
+        </attvalues>
+      </node>
+    </nodes>
+    <edges>
+      <edge id="0" source="1912208614095482882" target="2024547516499578887" weight="1" label="MENTION">
+        <attvalues>
+          <attvalue for="0" value="MENTION"/>
+          <attvalue for="1" value="2073567193921368099"/>
+        </attvalues>
+      </edge>
+      <edge id="1" source="1912208614095482882" target="1661876658314309632" weight="1" label="MENTION">
+        <attvalues>
+          <attvalue for="0" value="MENTION"/>
+          <attvalue for="1" value="2073567193921368099"/>
+        </attvalues>
+      </edge>
+      <edge id="2" source="1912208614095482882" target="1619992211071897600" weight="1" label="MENTION">
+        <attvalues>
+          <attvalue for="0" value="MENTION"/>
+          <attvalue for="1" value="2073567193921368099"/>
+        </attvalues>
+      </edge>
+      <edge id="3" source="1912208614095482882" target="1146058067244486656" weight="1" label="MENTION">
+        <attvalues>
+          <attvalue for="0" value="MENTION"/>
+          <attvalue for="1" value="2073567193921368099"/>
+        </attvalues>
+      </edge>
+      <edge id="4" source="1912208614095482882" target="2024547516499578887" weight="1" label="REPLY">
+        <attvalues>
+          <attvalue for="0" value="REPLY"/>
+          <attvalue for="1" value="2073567193921368099"/>
+        </attvalues>
+      </edge>
+      <edge id="5" source="2024547516499578887" target="1661876658314309632" weight="3" label="MENTION">
+        <attvalues>
+          <attvalue for="0" value="MENTION"/>
+          <attvalue for="1" value="2073565369411764303"/>
+        </attvalues>
+      </edge>
+      <edge id="6" source="2024547516499578887" target="1661876658314309632" weight="3" label="REPLY">
+        <attvalues>
+          <attvalue for="0" value="REPLY"/>
+          <attvalue for="1" value="2073565369411764303"/>
+        </attvalues>
+      </edge>
+      <edge id="7" source="2024547516499578887" target="1619992211071897600" weight="2" label="MENTION">
+        <attvalues>
+          <attvalue for="0" value="MENTION"/>
+          <attvalue for="1" value="2073565241397457160"/>
+        </attvalues>
+      </edge>
+      <edge id="8" source="2024547516499578887" target="1146058067244486656" weight="2" label="MENTION">
+        <attvalues>
+          <attvalue for="0" value="MENTION"/>
+          <attvalue for="1" value="2073565241397457160"/>
+        </attvalues>
+      </edge>
+    </edges>
+  </graph>
+</gexf>

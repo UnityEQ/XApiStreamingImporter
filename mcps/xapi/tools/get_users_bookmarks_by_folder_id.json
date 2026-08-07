@@ -1,0 +1,25 @@
+{
+  "name": "get_users_bookmarks_by_folder_id",
+  "description": "Get Users Bookmarks by Folder ID",
+  "inputSchema": {
+    "properties": {
+      "folder_id": {
+        "type": "string"
+      },
+      "id": {
+        "type": "string"
+      },
+      "max_results": {
+        "type": "integer"
+      },
+      "pagination_token": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "id",
+      "folder_id"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "create_users_bookmark",
+  "description": "Create Users Bookmark",
+  "inputSchema": {
+    "properties": {
+      "folder_id": {
+        "description": "Optional ID of the Bookmark folder to add the Post to. When omitted, the Post is added to the use...",
+        "type": "string"
+      },
+      "id": {
+        "type": "string"
+      },
+      "tweet_id": {
+        "description": "The ID of the Post to add to the user's Bookmarks.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "id",
+      "tweet_id"
+    ],
+    "type": "object"
+  }
+}

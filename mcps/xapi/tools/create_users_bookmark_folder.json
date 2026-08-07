@@ -1,0 +1,20 @@
+{
+  "name": "create_users_bookmark_folder",
+  "description": "Create Bookmark Folder",
+  "inputSchema": {
+    "properties": {
+      "id": {
+        "type": "string"
+      },
+      "name": {
+        "description": "Name of the Bookmark folder (1-25 characters).",
+        "type": "string"
+      }
+    },
+    "required": [
+      "id",
+      "name"
+    ],
+    "type": "object"
+  }
+}

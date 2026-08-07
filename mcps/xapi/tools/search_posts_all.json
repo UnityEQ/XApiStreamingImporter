@@ -1,0 +1,55 @@
+{
+  "name": "search_posts_all",
+  "description": "Search Posts All",
+  "inputSchema": {
+    "properties": {
+      "end_time": {
+        "type": "string"
+      },
+      "expansions": {
+        "description": "A comma separated list of fields to expand.",
+        "type": "string"
+      },
+      "max_results": {
+        "type": "integer"
+      },
+      "next_token": {
+        "type": "string"
+      },
+      "pagination_token": {
+        "type": "string"
+      },
+      "post.fields": {
+        "description": "A comma separated list of Post fields to display.",
+        "type": "string"
+      },
+      "query": {
+        "type": "string"
+      },
+      "since_id": {
+        "type": "string"
+      },
+      "sort_order": {
+        "enum": [
+          "recency",
+          "relevancy"
+        ],
+        "type": "string"
+      },
+      "start_time": {
+        "type": "string"
+      },
+      "until_id": {
+        "type": "string"
+      },
+      "user.fields": {
+        "description": "A comma separated list of User fields to display.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "type": "object"
+  }
+}

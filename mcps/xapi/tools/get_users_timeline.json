@@ -1,0 +1,49 @@
+{
+  "name": "get_users_timeline",
+  "description": "Get Users Timeline",
+  "inputSchema": {
+    "properties": {
+      "end_time": {
+        "type": "string"
+      },
+      "exclude": {
+        "description": "(comma-separated)",
+        "type": "string"
+      },
+      "expansions": {
+        "description": "A comma separated list of fields to expand.",
+        "type": "string"
+      },
+      "id": {
+        "type": "string"
+      },
+      "max_results": {
+        "type": "integer"
+      },
+      "pagination_token": {
+        "type": "string"
+      },
+      "post.fields": {
+        "description": "A comma separated list of Post fields to display.",
+        "type": "string"
+      },
+      "since_id": {
+        "type": "string"
+      },
+      "start_time": {
+        "type": "string"
+      },
+      "until_id": {
+        "type": "string"
+      },
+      "user.fields": {
+        "description": "A comma separated list of User fields to display.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "type": "object"
+  }
+}

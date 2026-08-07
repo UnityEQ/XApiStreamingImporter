@@ -8,6 +8,10 @@ class OfflineXApiClient:
 
     calls_attempted = 0
     calls_made = 0
+    estimated_spend_usd = 0.0
+    estimated_posts = 0
+    estimated_users = 0
+    next_call_ceiling_usd = 0.0
 
     def search_posts(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         return {"data": [], "meta": {"result_count": 0}}

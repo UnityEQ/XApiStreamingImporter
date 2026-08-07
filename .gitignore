@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# Local editor / agent artifacts
+terminals/
+.cursor/
+agent-tools/
+
+# Unrelated MCP tool caches (keep mcps/xapi only)
+mcps/coplay-mcp/
+mcps/figma/
+
+# Legacy flat data layout (use data/queries/<slug>/)
+data/output/
+data/state.db
+
+# Live collection state (pagination cursors + graph SQLite — not auth secrets,
+# but operational/user data; keep example GEXF/CSV/PNG under data/queries/)
+data/queries/**/state.db
+data/queries/**/.collect.lock
+**/.collect.lock

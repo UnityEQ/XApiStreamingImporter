@@ -15,20 +15,45 @@ Built for researchers who jump between topics: **one folder per query**, backwar
 
 After [setup](#setup-one-time), from the repo root:
 
+### Topic search (keyword / phrase)
+
 ```bash
 python -m x_graph.cli collect -q "digital circus lang:en" --confirm-spend --search-only --api-budget 10 --export-after
 ```
 
-That will:
+### User ego graph (all interactions involving one account)
 
-1. Search recent posts matching `digital circus lang:en` (newest first)
+For a force-directed graph of **everything involving one person** (their posts + replies to them + mentions of them), use `--user`:
+
+```bash
+python -m x_graph.cli collect -u eqbrowser --confirm-spend --search-only --api-budget 10 --export-after
+```
+
+That expands to the search query:
+
+```text
+from:eqbrowser OR to:eqbrowser OR @eqbrowser
+```
+
+| Operator | Captures |
+|----------|----------|
+| `from:user` | Posts they write (outbound mentions, replies, RTs, quotes) |
+| `to:user` | Replies directed at them |
+| `@user` | Posts that mention them |
+
+**Stay on `--search-only`** for max nodes/edges per credit: each search page returns up to ~100 posts and inline edges are free. Expansions (likers) cost extra API calls for `LIKE` edges only.
+
+Either path will:
+
+1. Search posts matching the query (newest first)
 2. Build mention / reply / RT / quote edges from the results (no extra API calls)
-3. Save state to `data/queries/digital-circus-lang-en/`
-4. Export `x_graph.gexf` + CSV to `data/queries/digital-circus-lang-en/output/`
+3. Save state under `data/queries/<slug>/`
+4. Export `x_graph.gexf` + CSV when you pass `--export-after`
 5. Enrich nodes for Gephi coloring (free, no API):
 
 ```bash
 python -m x_graph.cli enrich -q "digital circus lang:en"
+# or: python -m x_graph.cli enrich -q "from:eqbrowser OR to:eqbrowser OR @eqbrowser"
 # → output/x_graph_nodes_enriched.csv (adds primary_interaction per user)
 ```
 
@@ -143,6 +168,56 @@ Posts + inline edges only (`MENTION`, `REPLY`, `RETWEET`, `QUOTE`). No liker/RT/
 ```bash
 python -m x_graph.cli collect -q "digital circus lang:en" --confirm-spend --search-only --api-budget 10 --export-after
 ```
+
+### User ego graph (recommended recipe)
+
+```bash
+# Dollar-capped one-shot (recommended) — no --api-budget needed
+python -m x_graph.cli collect -u eqbrowser --confirm-spend --search-only --max-spend 1.00 --export-after
+
+# Re-run same command later: resumes older posts (does not re-fetch the old pages)
+python -m x_graph.cli collect -u eqbrowser --confirm-spend --search-only --max-spend 1.00 --export-after
+
+# Full history (costs more; needs app-only bearer token)
+python -m x_graph.cli collect -u eqbrowser --confirm-spend --search-only --search-mode all --max-spend 2.00 --export-after
+```
+
+### How spending works (read this)
+
+X pay-per-use bills **per resource returned**, not a flat fee per HTTP request:
+
+| Resource | Pilot rate (override with `--price-post` / `--price-user` if X changes it) |
+|----------|----------------------------------------|
+| Post read | ~$0.005 each |
+| User read | ~$0.01 each |
+
+One search page of ~100 posts (plus included users / referenced tweets) often lands roughly **$0.50–$2** depending on includes. Check [console.x.com](https://console.x.com) for your real rates and balance.
+
+| Flag | What it actually limits |
+|------|-------------------------|
+| `--api-budget N` | Max **HTTP attempts** this run (retries count). Hard stop. |
+| `--max-spend D` | Stop when **estimated** $ from posts/users returned hits `D`. Soft planning cap — **not** X's official bill. |
+| `--search-pages N` | How many search pages to try. With `--max-spend`, defaults to `--api-budget` so you don't re-run by hand. |
+
+**You do not have to re-run forever.** Prefer a dollar cap:
+
+```bash
+python -m x_graph.cli collect -u eqbrowser --confirm-spend --search-only --max-spend 1.00 --export-after
+```
+
+That single command pages backward until the crawl is done, the HTTP budget is hit, or estimated spend reaches ~$1. The summary prints `estimated_spend_usd` and cumulative `estimated_spend_total_usd` (also free via `status`). Always confirm real charges on X's console — estimates can under/over-count if pricing or billable includes change.
+
+**Token density tips for ego graphs**
+
+| Do | Avoid |
+|----|--------|
+| `--search-only` | Expansions unless you need `LIKE` edges |
+| `--search-pages 1` and re-run | Huge single-run page budgets on sparse archive windows |
+| `--search-mode recent` first | Jumping straight to `all` unless you need history |
+| Re-run only while `has_more_older_posts: true` | Blind re-runs after the crawl is exhausted |
+| Prefer `@user OR from:user OR to:user` (via `-u`) | Bare `@user` alone (misses their outbound posts) |
+
+Completed crawls now stop cleanly (`stopped_reason: search_exhausted`) instead of re-fetching the same newest page. Use `--fresh` to restart from newest, or `--incremental` to watch for new posts only.
 
 ### Same topic — keep paging backward
 
@@ -269,12 +344,16 @@ enrich_nodes(
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-q`, `--query` | required | X search query |
+| `-q`, `--query` | — | X search query (required unless `--user`) |
+| `-u`, `--user` | — | Ego graph: expands to `from:U OR to:U OR @U` |
 | `--confirm-spend` | off | **Required** for any live API call |
 | `--dry-run` | off | Plan only — zero API calls |
 | `--search-only` | off | Skip expansions (cheapest live mode) |
-| `--api-budget` | `30` | Max HTTP attempts per run (failures count) |
-| `--search-pages` | `1` | Pages per run × 100 posts, going older (raise for deeper single runs) |
+| `--max-spend` | off | **Primary $ control** — stop near this many estimated dollars |
+| `--api-budget` | `30` / `500`* | HTTP safety ceiling (*`500` when `--max-spend` is set and you omit this) |
+| `--price-post` | `0.005` | $/post used only for estimates + `--max-spend` |
+| `--price-user` | `0.01` | $/user used only for estimates + `--max-spend` |
+| `--search-pages` | `1`* | Pages per run (*auto = HTTP ceiling when `--max-spend` is set) |
 | `--expansions` | `5` | Posts to expand per run |
 | `--min-engagement` | `25` | Min score to queue expansion |
 | `--search-mode` | `recent` | `recent` (7-day) or `all` (full archive, app-only) |
@@ -330,6 +409,9 @@ Per-run API usage is logged in `state.db` → `run_log` (`api_calls_attempted`, 
 | `--confirm-spend` | Blocks live API unless you explicitly opt in |
 | `--dry-run` / `X_GRAPH_OFFLINE=1` | Zero API calls |
 | Default `--search-pages 1` | One search request per run — re-run to page backward |
+| Skip when crawl exhausted | Re-runs after completion do not re-hit the API |
+| Stop on all-duplicate page | Won't walk already-seen history page-by-page |
+| Cap empty archive windows | At most 3 empty full-archive window steps per run |
 | No generic retries (`max_retries=0`) | Auth/404 errors don't retry in a loop |
 | Rate-limit backoff | Up to 2 retries, 60s → 120s wait on 429 / throttle |
 | Transient backoff | 1 retry, 20s wait on `request failed` / 502 / 503 |
@@ -365,6 +447,8 @@ export X_GRAPH_OFFLINE=1       # macOS / Linux
 |------------------|---------|
 | `completed` | Normal finish |
 | `dry_run` | No API calls made |
+| `search_exhausted` | Crawl already finished — **zero API calls** (use `--fresh` / `--incremental`) |
+| `max_spend_reached` | Hit `--max-spend` estimated dollar cap |
 | `api_budget_exhausted` | Hit `--api-budget` |
 | `ApiRateLimitError` | Rate limited after backoff retries exhausted |
 | `ApiFatalError` | Fatal error after retries (auth, etc.) |

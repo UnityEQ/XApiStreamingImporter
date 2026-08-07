@@ -1,0 +1,40 @@
+{
+  "name": "get_posts_quoted_posts",
+  "description": "Get Posts Quoted Posts",
+  "inputSchema": {
+    "properties": {
+      "exclude": {
+        "enum": [
+          "replies",
+          "retweets"
+        ],
+        "type": "string"
+      },
+      "expansions": {
+        "description": "A comma separated list of fields to expand.",
+        "type": "string"
+      },
+      "id": {
+        "type": "string"
+      },
+      "max_results": {
+        "type": "integer"
+      },
+      "pagination_token": {
+        "type": "string"
+      },
+      "post.fields": {
+        "description": "A comma separated list of Post fields to display.",
+        "type": "string"
+      },
+      "user.fields": {
+        "description": "A comma separated list of User fields to display.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "type": "object"
+  }
+}

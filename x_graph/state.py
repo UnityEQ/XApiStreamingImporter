@@ -90,7 +90,14 @@ class StateStore:
 
     def reset_search_cursors(self) -> None:
         """Restart search from the most recent results (backward mode)."""
-        for key in ("since_id", "search_pagination_token"):
+        for key in (
+            "since_id",
+            "search_pagination_token",
+            "archive_window_start",
+            "archive_window_end",
+            "archive_can_expand",
+            "search_exhausted",
+        ):
             self.clear_meta(key)
 
     def reset_all(self) -> None:

@@ -1,0 +1,19 @@
+{
+  "name": "get_news",
+  "description": "Get news stories by ID",
+  "inputSchema": {
+    "properties": {
+      "id": {
+        "type": "string"
+      },
+      "news.fields": {
+        "description": "A comma separated list of News fields to display.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "type": "object"
+  }
+}

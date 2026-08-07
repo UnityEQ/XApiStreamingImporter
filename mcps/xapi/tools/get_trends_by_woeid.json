@@ -1,0 +1,22 @@
+{
+  "name": "get_trends_by_woeid",
+  "description": "Get Trends by Woeid",
+  "inputSchema": {
+    "properties": {
+      "max_trends": {
+        "type": "integer"
+      },
+      "trend.fields": {
+        "description": "A comma separated list of Trend fields to display.",
+        "type": "string"
+      },
+      "woeid": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "woeid"
+    ],
+    "type": "object"
+  }
+}
