@@ -333,7 +333,11 @@ class XApiClient:
         self.estimated_posts = 0
         self.estimated_users = 0
         self.last_response_spend_usd = 0.0
-        # Hint for logging / dry-run only (not a hard pre-call gate on first request).
+        # Last search request size (for adaptive max_results near --max-spend).
+        self.last_search_max_results = 0
+        self.last_search_spend_usd = 0.0
+        self._pending_search_max_results = 0
+        # Predicted worst-case cost of the call about to run (set by request helpers).
         self.next_call_ceiling_usd = self._pricing.estimate_search_page_ceiling(100)
 
     @staticmethod
@@ -349,6 +353,47 @@ class XApiClient:
             return [npx, "-y", "@xdevplatform/xurl"]
         return ["npx", "-y", "@xdevplatform/xurl"]
 
+    def remaining_spend_usd(self) -> float | None:
+        """Dollars left under ``max_spend_usd``, or None if no dollar cap."""
+        if self._max_spend_usd is None:
+            return None
+        return self._max_spend_usd - self.estimated_spend_usd
+
+    def adaptive_search_max_results(self, preferred: int = 100) -> int:
+        """Pick search ``max_results`` so the next page should fit the spend cap.
+
+        Without ``max_spend_usd``, returns ``preferred`` unchanged.
+
+        When a cap is set, shrinks the final page(s) so leftover budget is used
+        instead of stopping because remaining < last *full* page cost. Returns 0
+        when even a minimum page (10) is unlikely to fit.
+        """
+        preferred = max(10, min(100, preferred))
+        remaining = self.remaining_spend_usd()
+        if remaining is None:
+            return preferred
+
+        observed: float | None = None
+        if self.last_search_max_results > 0 and self.last_search_spend_usd > 0:
+            observed = self.last_search_spend_usd / self.last_search_max_results
+
+        n = self._pricing.max_search_results_for_budget(
+            remaining,
+            max_results=preferred,
+            min_results=10,
+            observed_usd_per_result=observed,
+        )
+        if 0 < n < preferred:
+            logger.info(
+                "Adaptive search page size: %s (preferred %s, remaining ~$%.4f, "
+                "observed $/slot=%s)",
+                n,
+                preferred,
+                remaining,
+                f"${observed:.4f}" if observed is not None else "n/a",
+            )
+        return n
+
     def _check_budget(self) -> None:
         if self.calls_attempted >= self._api_call_budget:
             raise ApiBudgetExceeded(
@@ -361,19 +406,9 @@ class XApiClient:
                     f"Estimated spend cap reached "
                     f"(${self.estimated_spend_usd:.4f} / ${self._max_spend_usd:.4f})"
                 )
-            # After at least one response: stop if remaining cannot cover another
-            # similar page (uses actual last cost so we rarely overshoot the cap).
-            if (
-                self.calls_made > 0
-                and self.last_response_spend_usd > 0
-                and remaining < self.last_response_spend_usd
-            ):
-                raise ApiSpendExceeded(
-                    f"Estimated spend near cap "
-                    f"(${self.estimated_spend_usd:.4f} / ${self._max_spend_usd:.4f}; "
-                    f"remaining ${remaining:.4f} < last page ~$"
-                    f"{self.last_response_spend_usd:.4f})"
-                )
+            # Partial final search pages are sized by adaptive_search_max_results
+            # (observed $/slot × safety). Do not refuse a call merely because
+            # remaining < last *full* page cost — that left budget stranded.
 
     def _record_attempt(self) -> None:
         self.calls_attempted += 1
@@ -602,6 +637,7 @@ class XApiClient:
         sort_order: str = "recency",
     ) -> dict[str, Any]:
         tool = "search_posts_all" if mode == "all" else "search_posts_recent"
+        max_results = max(10, min(100, int(max_results)))
         params: dict[str, Any] = {
             "query": query,
             "max_results": max_results,
@@ -623,7 +659,14 @@ class XApiClient:
         self.next_call_ceiling_usd = self._pricing.estimate_search_page_ceiling(
             max_results
         )
-        return self._request(tool, params)
+        # Track requested size before the call so spend recording can attribute
+        # this response as a search page for the next adaptive decision.
+        self._pending_search_max_results = max_results
+        payload = self._request(tool, params)
+        self.last_search_max_results = max_results
+        self.last_search_spend_usd = self.last_response_spend_usd
+        self._pending_search_max_results = 0
+        return payload
 
     def get_liking_users(
         self,

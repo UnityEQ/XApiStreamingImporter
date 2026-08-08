@@ -30,8 +30,8 @@ class PricingConfig:
         """Rough upper bound for one search page before the response arrives.
 
         Assumes a full page of posts plus a full page of included users and
-        referenced posts (worst-case expansions). Used only to refuse the next
-        call when remaining dollar budget cannot cover another page.
+        referenced posts (worst-case expansions). Used for dry-run planning and
+        as a fallback when no observed page cost is available yet.
         """
         n = max(1, max_results)
         # data posts + includes.tweets + includes.users
@@ -39,6 +39,46 @@ class PricingConfig:
 
     def estimate_user_list_ceiling(self, max_results: int = 100) -> float:
         return max(1, max_results) * self.user_read_usd
+
+    def max_search_results_for_budget(
+        self,
+        remaining_usd: float,
+        *,
+        max_results: int = 100,
+        min_results: int = 10,
+        observed_usd_per_result: float | None = None,
+        safety: float = 0.85,
+    ) -> int:
+        """Largest search ``max_results`` that should fit in ``remaining_usd``.
+
+        Prefers an empirical $/requested-slot from the last search page when
+        available (scaled by ``safety`` so the final page rarely overshoots the
+        cap). Falls back to :meth:`estimate_search_page_ceiling` on the first
+        page of a run.
+
+        Returns 0 when even ``min_results`` is unlikely to fit — caller should
+        stop rather than issue another search.
+        """
+        if remaining_usd <= 0:
+            return 0
+        max_results = max(min_results, min(100, max_results))
+        min_results = max(10, min(min_results, max_results))  # X search min is 10
+
+        if observed_usd_per_result is not None and observed_usd_per_result > 0:
+            # How many slots can we buy at the last page's effective rate?
+            affordable = int((remaining_usd * safety) / observed_usd_per_result)
+            if affordable >= min_results:
+                return min(max_results, affordable)
+            # Tiny remainder: try minimum page only if raw (no safety) still fits.
+            if min_results * observed_usd_per_result <= remaining_usd:
+                return min_results
+            return 0
+
+        # First page / no observation: walk down from preferred size via ceiling.
+        for n in range(max_results, min_results - 1, -1):
+            if self.estimate_search_page_ceiling(n) <= remaining_usd:
+                return n
+        return 0
 
 
 def count_billable_resources(payload: dict[str, Any]) -> tuple[int, int]:

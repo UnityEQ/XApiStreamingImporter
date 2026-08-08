@@ -71,6 +71,11 @@ class GraphCollector:
             self.client.estimated_users = 0
             if hasattr(self.client, "last_response_spend_usd"):
                 self.client.last_response_spend_usd = 0.0
+            # Fresh run: re-learn $/slot from this run's first full page.
+            if hasattr(self.client, "last_search_max_results"):
+                self.client.last_search_max_results = 0
+            if hasattr(self.client, "last_search_spend_usd"):
+                self.client.last_search_spend_usd = 0.0
         if self.config.dry_run:
             logger.info("DRY RUN — no X API calls will be made")
             return self._dry_run_summary()
@@ -292,6 +297,14 @@ class GraphCollector:
         available = max(1, self.config.api_call_budget - reserve - self.client.calls_attempted)
         return min(self.config.max_search_pages_per_run, available)
 
+    def _search_max_results_this_page(self) -> int:
+        """Preferred page size, shrunk near ``max_spend_usd`` to use leftover budget."""
+        preferred = self.config.search_page_size
+        adaptive = getattr(self.client, "adaptive_search_max_results", None)
+        if callable(adaptive) and self.config.max_spend_usd is not None:
+            return int(adaptive(preferred))
+        return preferred
+
     def _expansions_this_run(self) -> int:
         if self.config.search_only:
             return 0
@@ -350,11 +363,17 @@ class GraphCollector:
         for page in range(page_limit):
             request_token = pagination_token
             start_time, end_time = self._search_time_bounds()
+            max_results = self._search_max_results_this_page()
+            if max_results <= 0:
+                raise ApiSpendExceeded(
+                    "Estimated spend cap reached — remaining budget cannot cover "
+                    "another search page (even a minimum page of 10 results)"
+                )
             try:
                 payload = self.client.search_posts(
                     self.config.query,
                     mode=self.config.search_mode,
-                    max_results=self.config.search_page_size,
+                    max_results=max_results,
                     pagination_token=pagination_token,
                     since_id=since_id,
                     start_time=start_time,
@@ -362,6 +381,8 @@ class GraphCollector:
                     sort_order=self.config.sort_order,
                 )
             except ApiBudgetExceeded:
+                raise
+            except ApiSpendExceeded:
                 raise
             except (ApiRateLimitError, ApiFatalError):
                 raise
