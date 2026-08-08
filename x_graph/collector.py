@@ -96,11 +96,13 @@ class GraphCollector:
             "estimated_spend_total_usd": self._load_total_spend(),
             "max_spend_usd": self.config.max_spend_usd,
             "pricing_note": (
-                "estimated from post/user resources returned; not official X bill"
+                "estimated: search bills data posts only; user-list endpoints bill "
+                "data users; includes.* not counted — not official X bill"
             ),
             "stopped_reason": "completed",
         }
         search_ok = True
+        self._search_posts_new_this_run = 0
 
         # Avoid re-burning credits when a backward crawl already finished.
         # --fresh and --incremental always search.
@@ -133,13 +135,16 @@ class GraphCollector:
             summary["search_posts_new"] = self._collect_search_pages()
         except ApiBudgetExceeded:
             summary["stopped_reason"] = "api_budget_exhausted"
+            summary["search_posts_new"] = self._search_posts_new_this_run
             search_ok = False
         except ApiSpendExceeded as exc:
             summary["stopped_reason"] = "max_spend_reached"
+            summary["search_posts_new"] = self._search_posts_new_this_run
             logger.info("Stopping: %s", exc)
             search_ok = False
         except ApiRateLimitError as exc:
             summary["stopped_reason"] = type(exc).__name__
+            summary["search_posts_new"] = self._search_posts_new_this_run
             logger.error(
                 "Rate limit persisted after backoff retries — try again later: %s",
                 exc,
@@ -147,10 +152,12 @@ class GraphCollector:
             search_ok = False
         except ApiFatalError as exc:
             summary["stopped_reason"] = type(exc).__name__
+            summary["search_posts_new"] = self._search_posts_new_this_run
             logger.error("Stopping run immediately: %s", exc)
             search_ok = False
         except RuntimeError as exc:
             summary["stopped_reason"] = "search_failed"
+            summary["search_posts_new"] = self._search_posts_new_this_run
             logger.error("Search failed, skipping expansions: %s", exc)
             search_ok = False
 
@@ -255,8 +262,9 @@ class GraphCollector:
                 "user_read_usd": self.config.user_read_usd,
                 "worst_case_per_search_page_usd": round(page_ceiling, 4),
                 "note": (
-                    "X bills per resource returned (~$0.005/post, ~$0.01/user). "
-                    "--api-budget is HTTP attempts; --max-spend is an estimate cap."
+                    "Search estimate: data posts only (~$0.005 each); search includes "
+                    "are not counted. User-list expansions (likers etc.) bill data users "
+                    "(~$0.01). --api-budget is HTTP attempts; --max-spend is an estimate cap."
                 ),
             },
             **self.state.stats(),
@@ -353,6 +361,7 @@ class GraphCollector:
 
     def _collect_search_pages(self) -> int:
         new_posts = 0
+        self._search_posts_new_this_run = 0
         pagination_token = self.state.get_meta("search_pagination_token")
         since_id: str | None = None
         if self.config.collection_mode == "incremental":
@@ -365,6 +374,7 @@ class GraphCollector:
             start_time, end_time = self._search_time_bounds()
             max_results = self._search_max_results_this_page()
             if max_results <= 0:
+                self._search_posts_new_this_run = new_posts
                 raise ApiSpendExceeded(
                     "Estimated spend cap reached — remaining budget cannot cover "
                     "another search page (even a minimum page of 10 results)"
@@ -381,12 +391,16 @@ class GraphCollector:
                     sort_order=self.config.sort_order,
                 )
             except ApiBudgetExceeded:
+                self._search_posts_new_this_run = new_posts
                 raise
             except ApiSpendExceeded:
+                self._search_posts_new_this_run = new_posts
                 raise
             except (ApiRateLimitError, ApiFatalError):
+                self._search_posts_new_this_run = new_posts
                 raise
             except RuntimeError as exc:
+                self._search_posts_new_this_run = new_posts
                 logger.error("Search failed on page %s: %s", page + 1, exc)
                 raise
 
@@ -411,6 +425,7 @@ class GraphCollector:
                     page_new += 1
                     new_posts += 1
                     self._ingest_post_edges(post, users, ref_posts)
+            self._search_posts_new_this_run = new_posts
 
             meta = payload.get("meta") or {}
             newest_id = meta.get("newest_id")
@@ -470,6 +485,7 @@ class GraphCollector:
             pagination_token = next_token
             self.state.set_meta("search_pagination_token", next_token)
 
+        self._search_posts_new_this_run = new_posts
         return new_posts
 
     def _ingest_post_edges(

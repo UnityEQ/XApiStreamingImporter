@@ -188,15 +188,16 @@ X pay-per-use bills **per resource returned**, not a flat fee per HTTP request:
 
 | Resource | Pilot rate (override with `--price-post` / `--price-user` if X changes it) |
 |----------|----------------------------------------|
-| Post read | ~$0.005 each |
-| User read | ~$0.01 each |
+| Post read (search / quote `data` posts) | ~$0.005 each |
+| User read (likers / reposters / user lookup `data`) | ~$0.01 each |
+| Search `includes.*` (authors, ref tweets) | **not counted** in our estimate (matches console for keyword search) |
 
-One search page of ~100 posts (plus included users / referenced tweets) often lands roughly **$0.50–$2** depending on includes. Check [console.x.com](https://console.x.com) for your real rates and balance.
+One search page of ~100 posts is about **$0.50** estimated (`100 × $0.005`). Likers/reposters expansions add **~$0.01 per user** in `data`. Check [console.x.com](https://console.x.com) for your real rates and balance.
 
 | Flag | What it actually limits |
 |------|-------------------------|
 | `--api-budget N` | Max **HTTP attempts** this run (retries count). Hard stop. |
-| `--max-spend D` | Stop when **estimated** $ from posts/users returned hits `D`. Soft planning cap — **not** X's official bill. |
+| `--max-spend D` | Stop when **estimated** $ from billable resources hits `D`. Soft planning cap — **not** X's official bill. |
 | `--search-pages N` | How many search pages to try. With `--max-spend`, defaults to `--api-budget` so you don't re-run by hand. |
 
 **You do not have to re-run forever.** Prefer a dollar cap:
@@ -205,7 +206,7 @@ One search page of ~100 posts (plus included users / referenced tweets) often la
 python -m x_graph.cli collect -u eqbrowser --confirm-spend --search-only --max-spend 1.00 --export-after
 ```
 
-That single command pages backward until the crawl is done, the HTTP budget is hit, or estimated spend reaches ~$1. The summary prints `estimated_spend_usd` and cumulative `estimated_spend_total_usd` (also free via `status`). Always confirm real charges on X's console — estimates can under/over-count if pricing or billable includes change.
+That single command pages backward until the crawl is done, the HTTP budget is hit, or estimated spend reaches ~$1. The summary prints `estimated_spend_usd` and cumulative `estimated_spend_total_usd` (also free via `status`). Always confirm real charges on X's console.
 
 **Token density tips for ego graphs**
 

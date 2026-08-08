@@ -6,19 +6,32 @@ Pilot rates (check console.x.com — they change):
   Post (read):  ~$0.005 each
   User (read):  ~$0.01 each
 
-These estimates are intentionally conservative upper bounds for planning.
-They are NOT a bill. Always verify spend on developer.x.com / console.x.com.
+Empirical match to console.x.com for keyword **search** (Matt Rife / FNAF, 2026-08):
+
+  * Only posts in response ``data`` are billed as Post reads.
+  * ``includes.tweets`` / ``includes.users`` from search expansions did **not**
+    show up as User usage or extra Post usage on the console.
+  * Dedicated user-list endpoints (likers, reposters, user lookup) bill users
+    in ``data``.
+
+These estimates are for planning / ``--max-spend`` only. They are NOT a bill.
+Always verify spend on developer.x.com / console.x.com.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 
 # Official pilot defaults (override via CLI / env if X changes pricing).
 DEFAULT_POST_READ_USD = 0.005
 DEFAULT_USER_READ_USD = 0.01
+
+# How to attribute a response to billable resources.
+# posts_primary — search / post lookup / quote tweets: count posts in data only
+# users_primary — liking_users / reposted_by / user lookup: count users in data only
+BillingMode = Literal["posts_primary", "users_primary"]
 
 
 @dataclass(frozen=True)
@@ -27,15 +40,13 @@ class PricingConfig:
     user_read_usd: float = DEFAULT_USER_READ_USD
 
     def estimate_search_page_ceiling(self, max_results: int = 100) -> float:
-        """Rough upper bound for one search page before the response arrives.
+        """Upper bound for one search page before the response arrives.
 
-        Assumes a full page of posts plus a full page of included users and
-        referenced posts (worst-case expansions). Used for dry-run planning and
-        as a fallback when no observed page cost is available yet.
+        Keyword search is billed on posts in ``data`` only (not includes).
+        Ceiling is a full page of primary results.
         """
         n = max(1, max_results)
-        # data posts + includes.tweets + includes.users
-        return n * self.post_read_usd + n * self.post_read_usd + n * self.user_read_usd
+        return n * self.post_read_usd
 
     def estimate_user_list_ceiling(self, max_results: int = 100) -> float:
         return max(1, max_results) * self.user_read_usd
@@ -81,41 +92,48 @@ class PricingConfig:
         return 0
 
 
-def count_billable_resources(payload: dict[str, Any]) -> tuple[int, int]:
-    """Return (post_count, user_count) from a typical X API v2 JSON body."""
+def _data_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    data = payload.get("data")
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        return [data]
+    return []
+
+
+def count_billable_resources(
+    payload: dict[str, Any],
+    *,
+    mode: BillingMode = "posts_primary",
+) -> tuple[int, int]:
+    """Return (post_count, user_count) for estimated billing.
+
+    Counts only primary ``data`` resources. Search expansions in ``includes``
+    are ignored — console usage for keyword search matched ``data`` posts only
+    and showed zero User reads for author/mention expansions.
+    """
+    items = _data_items(payload)
     posts = 0
     users = 0
 
-    data = payload.get("data")
-    items: list[Any]
-    if data is None:
-        items = []
-    elif isinstance(data, list):
-        items = data
-    elif isinstance(data, dict):
-        items = [data]
-    else:
-        items = []
+    if mode == "users_primary":
+        for item in items:
+            if _looks_like_user(item) or "id" in item:
+                users += 1
+        return posts, users
 
+    # posts_primary (default)
     for item in items:
-        if not isinstance(item, dict):
-            continue
         if _looks_like_post(item):
             posts += 1
         elif _looks_like_user(item):
-            users += 1
+            # Unexpected on a posts endpoint; do not bill as a post.
+            continue
         elif "id" in item:
             # Ambiguous id-only objects: treat as posts (search/quote payloads).
             posts += 1
-
-    includes = payload.get("includes") or {}
-    if isinstance(includes, dict):
-        for tweet in includes.get("tweets") or []:
-            if isinstance(tweet, dict):
-                posts += 1
-        for user in includes.get("users") or []:
-            if isinstance(user, dict):
-                users += 1
 
     return posts, users
 
@@ -144,8 +162,10 @@ def _looks_like_user(item: dict[str, Any]) -> bool:
 def estimate_payload_usd(
     payload: dict[str, Any],
     pricing: PricingConfig,
+    *,
+    mode: BillingMode = "posts_primary",
 ) -> dict[str, float | int]:
-    posts, users = count_billable_resources(payload)
+    posts, users = count_billable_resources(payload, mode=mode)
     post_cost = posts * pricing.post_read_usd
     user_cost = users * pricing.user_read_usd
     return {
@@ -154,8 +174,29 @@ def estimate_payload_usd(
         "post_cost_usd": round(post_cost, 6),
         "user_cost_usd": round(user_cost, 6),
         "total_usd": round(post_cost + user_cost, 6),
+        "billing_mode": mode,
     }
 
 
 def format_usd(value: float) -> str:
     return f"${value:.4f}"
+
+
+# MCP / xurl tool → how we attribute spend for that response.
+TOOL_BILLING_MODE: dict[str, BillingMode] = {
+    "search_posts_all": "posts_primary",
+    "search_posts_recent": "posts_primary",
+    "get_posts_quoted_posts": "posts_primary",
+    "get_posts_by_id": "posts_primary",
+    "get_posts_by_ids": "posts_primary",
+    "get_posts_liking_users": "users_primary",
+    "get_posts_reposted_by": "users_primary",
+    "get_users_by_usernames": "users_primary",
+    "get_users_by_username": "users_primary",
+    "get_users_by_id": "users_primary",
+    "search_users": "users_primary",
+}
+
+
+def billing_mode_for_tool(tool_name: str) -> BillingMode:
+    return TOOL_BILLING_MODE.get(tool_name, "posts_primary")

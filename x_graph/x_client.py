@@ -12,7 +12,12 @@ from typing import Any, Callable, Literal
 from urllib.parse import urlencode
 
 from x_graph.config import POST_FIELDS, SEARCH_EXPANSIONS, USER_FIELDS
-from x_graph.pricing import PricingConfig, estimate_payload_usd
+from x_graph.pricing import (
+    BillingMode,
+    PricingConfig,
+    billing_mode_for_tool,
+    estimate_payload_usd,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -413,18 +418,24 @@ class XApiClient:
     def _record_attempt(self) -> None:
         self.calls_attempted += 1
 
-    def _record_payload_spend(self, payload: dict[str, Any]) -> None:
-        est = estimate_payload_usd(payload, self._pricing)
+    def _record_payload_spend(
+        self,
+        payload: dict[str, Any],
+        *,
+        mode: BillingMode = "posts_primary",
+    ) -> None:
+        est = estimate_payload_usd(payload, self._pricing, mode=mode)
         cost = float(est["total_usd"])
         self.estimated_posts += int(est["posts"])
         self.estimated_users += int(est["users"])
         self.last_response_spend_usd = cost
         self.estimated_spend_usd = round(self.estimated_spend_usd + cost, 6)
         logger.info(
-            "Est. +$%.4f this response (%s posts, %s users) → run total ~$%.4f%s",
+            "Est. +$%.4f this response (%s posts, %s users, mode=%s) → run total ~$%.4f%s",
             cost,
             est["posts"],
             est["users"],
+            mode,
             self.estimated_spend_usd,
             (
                 f" / cap ${self._max_spend_usd:.4f}"
@@ -453,12 +464,19 @@ class XApiClient:
         detail = json.dumps(payload["errors"], ensure_ascii=False)
         _raise_classified_error(detail, payload)
 
-    def _request(self, tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
+    def _request(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        *,
+        billing: BillingMode | None = None,
+    ) -> dict[str, Any]:
         rate_limit_attempts = 0
         transient_attempts = 0
         generic_attempts = 0
         max_generic_attempts = 1 + self._max_retries
         last_error: str | None = None
+        mode = billing if billing is not None else billing_mode_for_tool(tool_name)
 
         while True:
             self._check_budget()
@@ -469,7 +487,7 @@ class XApiClient:
                 else:
                     payload = self._xurl_request(tool_name, params)
                 self._handle_response_errors(payload)
-                self._record_payload_spend(payload)
+                self._record_payload_spend(payload, mode=mode)
                 if self._sleep_seconds:
                     time.sleep(self._sleep_seconds)
                 self.calls_made += 1
@@ -662,7 +680,8 @@ class XApiClient:
         # Track requested size before the call so spend recording can attribute
         # this response as a search page for the next adaptive decision.
         self._pending_search_max_results = max_results
-        payload = self._request(tool, params)
+        # Search: bill posts in data only (not includes.users / includes.tweets).
+        payload = self._request(tool, params, billing="posts_primary")
         self.last_search_max_results = max_results
         self.last_search_spend_usd = self.last_response_spend_usd
         self._pending_search_max_results = 0
@@ -685,7 +704,9 @@ class XApiClient:
         self.next_call_ceiling_usd = self._pricing.estimate_user_list_ceiling(
             max_results
         )
-        return self._request("get_posts_liking_users", params)
+        return self._request(
+            "get_posts_liking_users", params, billing="users_primary"
+        )
 
     def get_reposted_by(
         self,
@@ -704,7 +725,9 @@ class XApiClient:
         self.next_call_ceiling_usd = self._pricing.estimate_user_list_ceiling(
             max_results
         )
-        return self._request("get_posts_reposted_by", params)
+        return self._request(
+            "get_posts_reposted_by", params, billing="users_primary"
+        )
 
     def get_quoted_posts(
         self,
@@ -725,7 +748,10 @@ class XApiClient:
         self.next_call_ceiling_usd = self._pricing.estimate_search_page_ceiling(
             max_results
         )
-        return self._request("get_posts_quoted_posts", params)
+        # Quote list is a post endpoint; bill data posts only (not author includes).
+        return self._request(
+            "get_posts_quoted_posts", params, billing="posts_primary"
+        )
 
 
 def _coerce_errors(exc: Exception) -> Any:
