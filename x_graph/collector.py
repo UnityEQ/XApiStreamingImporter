@@ -103,6 +103,7 @@ class GraphCollector:
         }
         search_ok = True
         self._search_posts_new_this_run = 0
+        self._edges_added_this_run = 0
 
         # Avoid re-burning credits when a backward crawl already finished.
         # --fresh and --incremental always search.
@@ -198,6 +199,8 @@ class GraphCollector:
             float(summary["estimated_spend_usd"])
         )
         summary.update(self.state.stats())
+        # Per-run counter (stats() only has cumulative totals like "edges").
+        summary["edges_added"] = self._edges_added_this_run
         summary["has_more_older_posts"] = crawl_has_more(
             self.state,
             search_mode=self.config.search_mode,
@@ -703,3 +706,6 @@ class GraphCollector:
         self.state.add_edge(
             InteractionEdge(source_id, target_id, interaction, 1, post_id)
         )
+        # Count each recorded interaction event this run (including weight
+        # bumps on existing source/target/type keys). Self-loops are skipped.
+        self._edges_added_this_run = getattr(self, "_edges_added_this_run", 0) + 1
